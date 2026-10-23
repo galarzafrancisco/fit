@@ -1,0 +1,6 @@
+# Review guide: review guides
+
+- Is a list.
+- Each point is an assertion.
+- Points are objective, not subjective.
+- Points are not vague.

@@ -76,6 +76,8 @@ export class SyncService {
 
   /** Starts the first sync after connecting without blocking the callback page. Errors land in sync_runs */
   startInitialSync(connection: ProviderConnectionEntity): void {
+    // Garmin history arrives only through a backfill request; some tiers have none
+    if (connection.provider === 'garmin' && !this.config.garmin.backfillOnConnect) return;
     const promise = this.run(connection, 'connect', null)
       .catch((error) => this.logger.warn(`Initial ${connection.provider} sync failed: ${(error as Error).message}`))
       .finally(() => this.background.delete(promise));
