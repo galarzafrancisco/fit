@@ -22,7 +22,7 @@ permissions:
 jobs:
   test:
     name: Lint, build and test
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
 
     services:
@@ -93,7 +93,7 @@ jobs:
 
   security:
     name: Security checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 10
     steps:
       - name: Checkout code (full history for the secret scan)
@@ -118,7 +118,7 @@ jobs:
 
   image:
     name: Build and smoke-test container image
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
 
     services:
@@ -153,9 +153,16 @@ jobs:
         with:
           context: .
           load: true
+          platforms: linux/arm64
           tags: fit:ci
           cache-from: type=gha
           cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      - name: Verify image architecture (DGX Spark target)
+        run: |
+          arch=$(docker image inspect fit:ci --format '{{.Architecture}}')
+          echo "image architecture: $arch"
+          [ "$arch" = arm64 ]
 
       - name: Smoke test image (PostgreSQL, hardened like a deployment)
         # Production mode: migrations run, /health answers, unauthenticated /api

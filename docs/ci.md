@@ -9,8 +9,9 @@ and on pushes to `main`. All three jobs must pass.
 | **Security checks** | `npm audit --omit=dev --audit-level=high` (blocking: what ships in the image); full `npm audit` (warning only: dev tooling advisories); gitleaks over the full git history (blocking) |
 | **Build and smoke-test container image** | Builds the Dockerfile, runs it like a hardened deployment (uid 1000, read-only root, no capabilities) against Postgres: migrations run, `/health` OK, unauthenticated `/api` and `/mcp` answer 401, a restart keeps data and re-runs no migrations; the image refuses to start without `TOKEN_ENCRYPTION_KEY` or a database |
 
-Runners are `ubuntu-24.04` (the repository is private; money uses free arm
-runners available to public repositories). Nothing is published or deployed
+Runners are `ubuntu-24.04-arm` (free for public repositories). The container
+image is built for `linux/arm64`, the DGX Spark target, and the smoke test runs
+that arm64 image natively; CI asserts the image architecture is `arm64`. Nothing is published or deployed
 yet; see [deployment.md](deployment.md).
 
 Run the same checks locally:
