@@ -1,0 +1,40 @@
+{
+  "name": "fit",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Fit: MCP-first fitness activity platform (Strava, Garmin), federated auth via Taico.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "nx run-many -t build",
+    "build:dev": "npm ci && npm run build && npm run verify:auth",
+    "dev": "npm -w @fit/backend run dev",
+    "test": "nx run-many -t test",
+    "typecheck": "nx run-many -t typecheck",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "verify:auth": "node scripts/verify-auth-imports.mjs",
+    "nx": "nx",
+    "graph": "nx graph",
+    "start": "npm -w @fit/backend run start"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.13.0",
+    "nx": "^21.0.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/galarzafrancisco/fit.git"
+  },
+  "author": "Francisco Galarza"
+}
