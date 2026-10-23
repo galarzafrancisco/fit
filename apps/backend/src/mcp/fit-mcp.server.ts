@@ -45,7 +45,8 @@ export class FitMcpServerFactory {
       shape: Shape,
       run: (args: z.infer<z.ZodObject<Shape>>) => Promise<unknown>,
     ) => {
-      server.registerTool(name, { description, annotations, inputSchema: shape }, (async (args: z.infer<z.ZodObject<Shape>>) => toResult(() => run(args))) as never);
+      server.registerTool(name, { description, annotations, inputSchema: shape }, (async (args: z.infer<z.ZodObject<Shape>>) =>
+        toResult(() => run(args))) as never);
     };
 
     tool('whoami', 'The Fit user the current access token maps to', read, {}, async () => user);
@@ -78,7 +79,9 @@ export class FitMcpServerFactory {
       syncShape,
       (args) => this.sync.syncForUser(user, args),
     );
-    tool('list_sync_runs', 'Recent syncs with their status, counts and errors (audit trail), newest first', read, listSyncRunsShape, (args) => this.sync.listRuns(user, args));
+    tool('list_sync_runs', 'Recent syncs with their status, counts and errors (audit trail), newest first', read, listSyncRunsShape, (args) =>
+      this.sync.listRuns(user, args),
+    );
     tool(
       'list_webhook_events',
       'Recent provider webhook events for the user (new, updated or deleted activities, revocations) with processing status and errors, newest first',
@@ -114,12 +117,20 @@ export class FitMcpServerFactory {
       new ResourceTemplate('fit://activities/{activityId}', {
         list: async () => {
           const { items } = await this.activities.list(user, { limit: 50 });
-          return { resources: items.map((a) => ({ uri: `fit://activities/${a.id}`, name: `${a.startTime.slice(0, 10)} ${a.name ?? a.sport}`, mimeType: 'application/json' })) };
+          return {
+            resources: items.map((a) => ({
+              uri: `fit://activities/${a.id}`,
+              name: `${a.startTime.slice(0, 10)} ${a.name ?? a.sport}`,
+              mimeType: 'application/json',
+            })),
+          };
         },
       }),
       { title: 'Activity', description: 'One activity with its normalized metrics and provenance', mimeType: 'application/json' },
       async (uri, { activityId }) => ({
-        contents: [{ uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await this.activities.get(user, { activityId: String(activityId) }), null, 2) }],
+        contents: [
+          { uri: uri.href, mimeType: 'application/json', text: JSON.stringify(await this.activities.get(user, { activityId: String(activityId) }), null, 2) },
+        ],
       }),
     );
 
@@ -136,7 +147,9 @@ async function toResult(run: () => Promise<unknown>): Promise<CallToolResult> {
     if (error instanceof DomainError) {
       return {
         isError: true,
-        content: [{ type: 'text', text: JSON.stringify({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }) }],
+        content: [
+          { type: 'text', text: JSON.stringify({ error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) } }) },
+        ],
       };
     }
     throw error;

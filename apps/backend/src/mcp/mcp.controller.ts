@@ -30,6 +30,9 @@ export class McpController {
   /** No sessions and no server-sent stream in stateless mode */
   @All()
   notAllowed(@Res() res: Response): void {
-    res.status(405).set('Allow', 'POST').json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
+    res
+      .status(405)
+      .set('Allow', 'POST')
+      .json({ jsonrpc: '2.0', error: { code: -32000, message: 'Method not allowed' }, id: null });
   }
 }

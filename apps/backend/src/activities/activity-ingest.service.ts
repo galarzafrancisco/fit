@@ -51,7 +51,13 @@ export class ActivityIngestService {
   ) {}
 
   /** Throws ActivityMappingError when the payload is not a usable activity */
-  async ingest(input: { userId: string; connectionId: string | null; provider: Provider; raw: unknown; source: ActivitySource }): Promise<{ activityId: string; outcome: IngestOutcome }> {
+  async ingest(input: {
+    userId: string;
+    connectionId: string | null;
+    provider: Provider;
+    raw: unknown;
+    source: ActivitySource;
+  }): Promise<{ activityId: string; outcome: IngestOutcome }> {
     const raw = scrubPayload(input.raw);
     const normalized = this.registry.get(input.provider).normalize(raw);
     const hash = contentHash(raw);
@@ -116,7 +122,15 @@ export class ActivityIngestService {
     return (result.affected ?? 0) > 0;
   }
 
-  private async addPayload(manager: EntityManager, activityId: string, userId: string, payload: Record<string, unknown>, hash: string, source: ActivitySource, at: Date) {
+  private async addPayload(
+    manager: EntityManager,
+    activityId: string,
+    userId: string,
+    payload: Record<string, unknown>,
+    hash: string,
+    source: ActivitySource,
+    at: Date,
+  ) {
     await manager
       .createQueryBuilder()
       .insert()

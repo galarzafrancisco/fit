@@ -62,7 +62,10 @@ export class ApiController {
   @Get('webhook-events')
   webhookEvents(@AuthenticatedUser() user: CurrentUser, @Query() query: Record<string, string>) {
     const limit = int(query.limit);
-    return this.webhooks.listForUser(user.id, { provider: query.provider === 'strava' || query.provider === 'garmin' ? query.provider : undefined, limit: limit && limit > 0 && limit <= 100 ? limit : undefined });
+    return this.webhooks.listForUser(user.id, {
+      provider: query.provider === 'strava' || query.provider === 'garmin' ? query.provider : undefined,
+      limit: limit && limit > 0 && limit <= 100 ? limit : undefined,
+    });
   }
 
   @Get('activities')

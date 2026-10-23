@@ -15,7 +15,10 @@ export default tseslint.config(
       // Only config modules read the environment (see AGENTS.md)
       'no-restricted-syntax': [
         'error',
-        { selector: "MemberExpression[object.name='process'][property.name='env']", message: 'Read environment variables only in apps/backend/src/config/env.config.ts' },
+        {
+          selector: "MemberExpression[object.name='process'][property.name='env']",
+          message: 'Read environment variables only in apps/backend/src/config/env.config.ts',
+        },
       ],
     },
   },

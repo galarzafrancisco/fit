@@ -89,7 +89,10 @@ export class ConnectionsService {
    * to approve access. The state is random, stored hashed, single-use and
    * short-lived; for PKCE providers the verifier is stored encrypted.
    */
-  async startConnect(user: CurrentUser, providerInput: unknown): Promise<{ provider: Provider; authorizationUrl: string; expiresAt: string; instructions: string }> {
+  async startConnect(
+    user: CurrentUser,
+    providerInput: unknown,
+  ): Promise<{ provider: Provider; authorizationUrl: string; expiresAt: string; instructions: string }> {
     const provider = parseInput(providerSchema, providerInput);
     const adapter = this.registry.get(provider);
     // Throws not_configured, naming the variables and docs, when credentials are missing
@@ -134,7 +137,8 @@ export class ConnectionsService {
     if (!isProvider(input.provider)) throw new ConnectCallbackError('Unknown provider.');
     const provider = input.provider;
     const adapter = this.registry.get(provider);
-    if (!input.state || input.state.length > 200) throw new ConnectCallbackError('The sign-in link is missing its state. Start connecting again from your AI assistant.');
+    if (!input.state || input.state.length > 200)
+      throw new ConnectCallbackError('The sign-in link is missing its state. Start connecting again from your AI assistant.');
     const state = await this.repo.consumeState(sha256(input.state));
     if (!state || state.provider !== provider) throw new ConnectCallbackError('This sign-in link is invalid or was already used. Start connecting again.');
     if (state.expiresAt.getTime() < Date.now()) throw new ConnectCallbackError('This sign-in link has expired. Start connecting again.');
@@ -156,49 +160,53 @@ export class ConnectionsService {
     const scopes = grant.scopes ?? [];
     if (grant.scopes && !adapter.requiredScopes.some((required) => scopes.some((s) => s === required || s.startsWith(`${required}_`)))) {
       await adapter.revoke(grant.accessToken);
-      throw new ConnectCallbackError(`Fit needs permission to read your activities (${adapter.requiredScopes.join(', ')}). Connect again and keep that permission selected.`);
+      throw new ConnectCallbackError(
+        `Fit needs permission to read your activities (${adapter.requiredScopes.join(', ')}). Connect again and keep that permission selected.`,
+      );
     }
 
-    const connection = await this.uow.run(async (manager) => {
-      const owner = await this.repo.findByExternal(provider, account.externalUserId, manager);
-      if (owner && owner.userId !== state.userId) {
-        if (owner.status === 'active' || owner.status === 'needs_reauth') {
-          throw new ConflictError(`This ${capitalize(provider)} account is already connected to another Fit user.`);
+    const connection = await this.uow
+      .run(async (manager) => {
+        const owner = await this.repo.findByExternal(provider, account.externalUserId, manager);
+        if (owner && owner.userId !== state.userId) {
+          if (owner.status === 'active' || owner.status === 'needs_reauth') {
+            throw new ConflictError(`This ${capitalize(provider)} account is already connected to another Fit user.`);
+          }
+          // A stale, inactive link from another Fit user: the provider account now belongs to this user
+          await this.repo.delete(owner.id, manager);
         }
-        // A stale, inactive link from another Fit user: the provider account now belongs to this user
-        await this.repo.delete(owner.id, manager);
-      }
-      let row = await this.repo.findForUser(state.userId, provider, manager);
-      if (row && row.externalUserId !== account.externalUserId) {
-        // The user switched to a different provider account: start a fresh connection, keep old activities
-        await this.repo.delete(row.id, manager);
-        row = null;
-      }
-      const now = new Date();
-      const connection =
-        row ??
-        Object.assign(new ProviderConnectionEntity(), {
-          id: randomUUID(),
-          userId: state.userId,
-          provider,
-          externalUserId: account.externalUserId,
-          syncCursor: null,
-          lastSyncAt: null,
+        let row = await this.repo.findForUser(state.userId, provider, manager);
+        if (row && row.externalUserId !== account.externalUserId) {
+          // The user switched to a different provider account: start a fresh connection, keep old activities
+          await this.repo.delete(row.id, manager);
+          row = null;
+        }
+        const now = new Date();
+        const connection =
+          row ??
+          Object.assign(new ProviderConnectionEntity(), {
+            id: randomUUID(),
+            userId: state.userId,
+            provider,
+            externalUserId: account.externalUserId,
+            syncCursor: null,
+            lastSyncAt: null,
+          });
+        Object.assign(connection, {
+          displayName: account.displayName ?? connection.displayName ?? null,
+          scopes,
+          status: 'active' as const,
+          connectedAt: now,
+          lastError: null,
+          lastErrorAt: null,
         });
-      Object.assign(connection, {
-        displayName: account.displayName ?? connection.displayName ?? null,
-        scopes,
-        status: 'active' as const,
-        connectedAt: now,
-        lastError: null,
-        lastErrorAt: null,
+        this.applyGrant(connection, grant);
+        return this.repo.save(connection, manager);
+      })
+      .catch((error) => {
+        if (error instanceof ConflictError) throw new ConnectCallbackError(error.message);
+        throw error;
       });
-      this.applyGrant(connection, grant);
-      return this.repo.save(connection, manager);
-    }).catch((error) => {
-      if (error instanceof ConflictError) throw new ConnectCallbackError(error.message);
-      throw error;
-    });
     this.logger.log(`Connected ${provider} account ${account.externalUserId} for user ${state.userId}`);
     return { connection, userId: state.userId };
   }
@@ -263,30 +271,32 @@ export class ConnectionsService {
     const cached = this.validToken(current);
     if (cached) return cached;
 
-    return this.uow.run(async (manager) => {
+    // The status change to needs_reauth must commit, so the transaction returns it instead of throwing
+    const result = await this.uow.run(async (manager): Promise<{ token: string } | { reauth: string }> => {
       const connection = await this.repo.lockById(connectionId, manager);
-      if (!connection || connection.status !== 'active') throw new ReauthorizationRequiredError('The provider connection is not active; connect again');
+      if (!connection || connection.status !== 'active') return { reauth: 'The provider connection is not active; connect again' };
+      const name = capitalize(connection.provider);
       const fresh = this.validToken(connection);
-      if (fresh) return fresh;
+      if (fresh) return { token: fresh };
       const refreshToken = this.vault.tryDecrypt(connection.refreshTokenEnc, connection.id);
       if (!refreshToken) {
         await this.needsReauth(connection, 'Stored credentials could not be read (encryption key changed?); connect again', manager);
-        throw new ReauthorizationRequiredError(`${capitalize(connection.provider)} needs to be connected again`);
+        return { reauth: `${name} needs to be connected again` };
       }
       let grant: TokenGrant;
       try {
         grant = await this.registry.get(connection.provider).refresh(refreshToken);
       } catch (error) {
-        if (error instanceof ProviderAuthError) {
-          await this.needsReauth(connection, `${capitalize(connection.provider)} refused the refresh token; connect again`, manager);
-          throw new ReauthorizationRequiredError(`${capitalize(connection.provider)} needs to be connected again`);
-        }
-        throw error;
+        if (!(error instanceof ProviderAuthError)) throw error;
+        await this.needsReauth(connection, `${name} refused the refresh token; connect again`, manager);
+        return { reauth: `${name} needs to be connected again` };
       }
       this.applyGrant(connection, grant, refreshToken);
       await this.repo.save(connection, manager);
-      return grant.accessToken;
+      return { token: grant.accessToken };
     });
+    if ('reauth' in result) throw new ReauthorizationRequiredError(result.reauth);
+    return result.token;
   }
 
   /** The user's connection for a provider, if it is usable for a sync */
@@ -294,7 +304,9 @@ export class ConnectionsService {
     const connection = await this.repo.findForUser(user.id, provider);
     if (!connection || connection.status === 'disconnected') throw new NotFoundError(`${capitalize(provider)} is not connected. Use connect_provider first.`);
     if (connection.status !== 'active') {
-      throw new ReauthorizationRequiredError(`${capitalize(provider)} access was ${connection.status === 'revoked' ? 'revoked' : 'lost'}; connect again with connect_provider`);
+      throw new ReauthorizationRequiredError(
+        `${capitalize(provider)} access was ${connection.status === 'revoked' ? 'revoked' : 'lost'}; connect again with connect_provider`,
+      );
     }
     return connection;
   }

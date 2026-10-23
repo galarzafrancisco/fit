@@ -1,10 +1,7 @@
 {
   "$schema": "./node_modules/nx/schemas/nx-schema.json",
   "namedInputs": {
-    "default": [
-      "{projectRoot}/**/*",
-      "sharedGlobals"
-    ],
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
     "production": [
       "default",
       "!{projectRoot}/**/*.spec.ts",
@@ -16,58 +13,30 @@
       "!{projectRoot}/coverage/**/*",
       "!{projectRoot}/*.tsbuildinfo"
     ],
-    "sharedGlobals": [
-      "{workspaceRoot}/tsconfig.base.json",
-      "{workspaceRoot}/package-lock.json",
-      "{workspaceRoot}/nx.json"
-    ]
+    "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json", "{workspaceRoot}/package-lock.json", "{workspaceRoot}/nx.json"]
   },
   "targetDefaults": {
     "build": {
-      "dependsOn": [
-        "^build"
-      ],
-      "inputs": [
-        "production",
-        "^production"
-      ],
-      "outputs": [
-        "{projectRoot}/dist"
-      ],
+      "dependsOn": ["^build"],
+      "inputs": ["production", "^production"],
+      "outputs": ["{projectRoot}/dist"],
       "cache": true
     },
     "build:prod": {
-      "dependsOn": [
-        "^build:prod"
-      ],
-      "inputs": [
-        "production",
-        "^production"
-      ],
-      "outputs": [
-        "{projectRoot}/dist"
-      ],
+      "dependsOn": ["^build:prod"],
+      "inputs": ["production", "^production"],
+      "outputs": ["{projectRoot}/dist"],
       "cache": true
     },
     "typecheck": {
-      "dependsOn": [
-        "^build"
-      ],
-      "inputs": [
-        "default",
-        "^production"
-      ],
+      "dependsOn": ["^build"],
+      "inputs": ["default", "^production"],
       "cache": true
     },
     "test": {
-      "inputs": [
-        "default",
-        "^production"
-      ],
+      "inputs": ["default", "^production"],
       "cache": true,
-      "dependsOn": [
-        "^build"
-      ]
+      "dependsOn": ["^build"]
     }
   },
   "defaultBase": "main"

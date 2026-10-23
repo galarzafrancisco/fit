@@ -30,7 +30,8 @@ export async function providerRequest(
   try {
     response = await fetchImpl(url, { ...rest, signal: AbortSignal.timeout(timeoutMs) });
   } catch (error) {
-    const reason = error instanceof Error && error.name === 'TimeoutError' ? `timed out after ${timeoutMs} ms` : 'network error';
+    // AbortSignal.timeout rejects with a DOMException, which is not always an Error instance across realms
+    const reason = (error as { name?: unknown } | null)?.name === 'TimeoutError' ? `timed out after ${timeoutMs} ms` : 'network error';
     throw new UpstreamError(`${provider} request failed: ${reason}`);
   }
   const text = await response.text();
@@ -44,7 +45,10 @@ export async function providerRequest(
   }
   if (response.status === 429) {
     const retryAfter = Number(response.headers.get('retry-after'));
-    throw new UpstreamRateLimitedError(`${provider} rate limit reached; try again later`, Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : undefined);
+    throw new UpstreamRateLimitedError(
+      `${provider} rate limit reached; try again later`,
+      Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : undefined,
+    );
   }
   if (response.status >= 500) throw new UpstreamError(`${provider} answered HTTP ${response.status}`);
   return { status: response.status, body, headers: response.headers };

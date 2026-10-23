@@ -20,9 +20,7 @@ export class UsersRepository {
    * Returns the user for (issuer, subject), creating it if needed. Safe when
    * two first requests race: the unique index lets one insert win.
    */
-  async upsertIdentity(
-    identity: { issuer: string; subject: string; displayName: string | null; email: string | null },
-  ): Promise<UserEntity> {
+  async upsertIdentity(identity: { issuer: string; subject: string; displayName: string | null; email: string | null }): Promise<UserEntity> {
     const manager = this.uow.manager;
     await manager
       .createQueryBuilder()

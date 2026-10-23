@@ -151,7 +151,13 @@ export class WebhookInboxService {
   }
 
   /** Inserts a delivery; false when the same event was already stored (provider retry) */
-  private async store(input: { provider: Provider; eventKey: string; eventType: string; externalUserId: string | null; payload: Record<string, unknown> }): Promise<boolean> {
+  private async store(input: {
+    provider: Provider;
+    eventKey: string;
+    eventType: string;
+    externalUserId: string | null;
+    payload: Record<string, unknown>;
+  }): Promise<boolean> {
     const now = new Date();
     const result = await this.uow.manager
       .createQueryBuilder()

@@ -23,7 +23,13 @@ export class ConnectCallbackController {
     const text = (key: string) => (typeof query[key] === 'string' ? (query[key] as string) : undefined);
     res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
     try {
-      const { connection } = await this.connections.completeConnect({ provider, state: text('state'), code: text('code'), error: text('error'), scope: text('scope') });
+      const { connection } = await this.connections.completeConnect({
+        provider,
+        state: text('state'),
+        code: text('code'),
+        error: text('error'),
+        scope: text('scope'),
+      });
       this.sync.startInitialSync(connection);
       const name = capitalize(connection.provider);
       res

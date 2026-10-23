@@ -150,7 +150,13 @@ export class SyncService {
           for (const item of result.items) {
             run.fetched++;
             try {
-              const { outcome } = await this.ingest.ingest({ userId: connection.userId, connectionId: connection.id, provider: connection.provider, raw: item, source: 'sync' });
+              const { outcome } = await this.ingest.ingest({
+                userId: connection.userId,
+                connectionId: connection.id,
+                provider: connection.provider,
+                raw: item,
+                source: 'sync',
+              });
               run[outcome]++;
             } catch (error) {
               if (!(error instanceof ActivityMappingError)) throw error;

@@ -6,7 +6,7 @@ import { isUuid, parseInput } from '../common/validation';
 import { UnitOfWork } from '../database/unit-of-work';
 import type { CurrentUser } from '../users/users.service';
 import { ActivityEntity, ActivityPayloadEntity } from './activity.entities';
-import { getActivitySchema, listActivitiesSchema, summarySchema, type ListActivitiesInput, type SummaryInput } from './activities.schemas';
+import { getActivitySchema, listActivitiesSchema, summarySchema, type ListActivitiesInput } from './activities.schemas';
 
 export type ActivityView = {
   id: string;
@@ -125,7 +125,10 @@ export class ActivitiesService {
     return detail;
   }
 
-  async summary(user: CurrentUser, input: unknown): Promise<{ from: string | null; to: string | null; groupBy: string; totals: SummaryGroup; groups: SummaryGroup[] }> {
+  async summary(
+    user: CurrentUser,
+    input: unknown,
+  ): Promise<{ from: string | null; to: string | null; groupBy: string; totals: SummaryGroup; groups: SummaryGroup[] }> {
     const args = parseInput(summarySchema, input);
     const groupBy = args.groupBy ?? 'sport';
     const qb = this.filtered(user, args).andWhere('a.deletedAt IS NULL');
@@ -152,7 +155,18 @@ export class ActivitiesService {
       .orderBy('1', 'ASC')
       .getRawMany();
 
-    let groups = rows.map((row) => group(String(row.key), Number(row.count), Number(row.distance), Number(row.moving), Number(row.elapsed), Number(row.elevation), Number(row.calories), Number(row.longest)));
+    let groups = rows.map((row) =>
+      group(
+        String(row.key),
+        Number(row.count),
+        Number(row.distance),
+        Number(row.moving),
+        Number(row.elapsed),
+        Number(row.elevation),
+        Number(row.calories),
+        Number(row.longest),
+      ),
+    );
     if (groupBy === 'sport_group') {
       const merged = new Map<string, SummaryGroup>();
       for (const g of groups) {
@@ -166,7 +180,10 @@ export class ActivitiesService {
     return { from: range.from?.toISOString() ?? null, to: range.to?.toISOString() ?? null, groupBy, totals, groups };
   }
 
-  private filtered(user: CurrentUser, args: Pick<ListActivitiesInput, 'from' | 'to' | 'provider' | 'sport' | 'sportGroup'>): SelectQueryBuilder<ActivityEntity> {
+  private filtered(
+    user: CurrentUser,
+    args: Pick<ListActivitiesInput, 'from' | 'to' | 'provider' | 'sport' | 'sportGroup'>,
+  ): SelectQueryBuilder<ActivityEntity> {
     const qb = this.uow.manager.createQueryBuilder(ActivityEntity, 'a').where('a.userId = :userId', { userId: user.id });
     const range = dateRange(args);
     if (range.from && range.to && range.from >= range.to) throw new ValidationError('from must be before to');
@@ -244,7 +261,16 @@ function round(value: number, digits: number): number {
   return Math.round(value * f) / f;
 }
 
-function group(key: string, count: number, distance: number, moving: number, elapsed: number, elevation: number, calories: number, longest: number): SummaryGroup {
+function group(
+  key: string,
+  count: number,
+  distance: number,
+  moving: number,
+  elapsed: number,
+  elevation: number,
+  calories: number,
+  longest: number,
+): SummaryGroup {
   return {
     key,
     count,

@@ -12,7 +12,15 @@ module.exports = {
       'ts-jest',
       {
         // @taico/auth, jose and the MCP SDK ship ESM, so their JavaScript is transformed too
-        tsconfig: { ...compilerOptions, module: 'commonjs', moduleResolution: 'node10', resolvePackageJsonExports: false, allowJs: true, isolatedModules: true, incremental: false },
+        tsconfig: {
+          ...compilerOptions,
+          module: 'commonjs',
+          moduleResolution: 'node10',
+          resolvePackageJsonExports: false,
+          allowJs: true,
+          isolatedModules: true,
+          incremental: false,
+        },
         diagnostics: { ignoreCodes: ['TS151001'] },
       },
     ],

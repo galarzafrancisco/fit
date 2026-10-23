@@ -91,14 +91,25 @@ export class WebhookHandlers {
       case 'garmin.activity':
         return this.importOne(connection, delivery.payload);
       case 'garmin.activity_ping': {
+        const callbackUrl = String(delivery.payload.callbackURL);
+        // Checked again inside the adapter; here it makes a forged URL a permanent failure instead of a retry
+        if (!URL.canParse(callbackUrl) || new URL(callbackUrl).host !== this.registry.garmin.apiHost) {
+          throw new PermanentDeliveryError('Garmin ping callback URL is not on the Garmin API host');
+        }
         const token = await this.connections.accessToken(connection.id);
-        const items = await this.registry.garmin.fetchCallback(token, String(delivery.payload.callbackURL));
+        const items = await this.registry.garmin.fetchCallback(token, callbackUrl);
         const counts: Record<string, number> = {};
         for (const item of items) {
           const { outcome } = await this.importOne(connection, item);
           counts[outcome] = (counts[outcome] ?? 0) + 1;
         }
-        return { status: 'processed', outcome: Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(', ') || 'no activities' };
+        return {
+          status: 'processed',
+          outcome:
+            Object.entries(counts)
+              .map(([k, v]) => `${v} ${k}`)
+              .join(', ') || 'no activities',
+        };
       }
       default:
         return { status: 'ignored', outcome: `unhandled event type ${delivery.eventType}` };
@@ -107,7 +118,13 @@ export class WebhookHandlers {
 
   private async importOne(connection: ProviderConnectionEntity, raw: unknown): Promise<HandlerResult> {
     try {
-      const { outcome } = await this.ingest.ingest({ userId: connection.userId, connectionId: connection.id, provider: connection.provider, raw, source: 'webhook' });
+      const { outcome } = await this.ingest.ingest({
+        userId: connection.userId,
+        connectionId: connection.id,
+        provider: connection.provider,
+        raw,
+        source: 'webhook',
+      });
       return { status: 'processed', outcome: `activity ${outcome}` };
     } catch (error) {
       if (error instanceof ActivityMappingError) throw new PermanentDeliveryError(`Unreadable activity: ${error.message}`);

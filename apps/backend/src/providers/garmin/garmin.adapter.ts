@@ -150,7 +150,8 @@ export class GarminAdapter implements ProviderAdapter {
     });
     if (response.status === 400 || response.status === 401) throw new ProviderAuthError('garmin', 'Garmin refused the authorization grant');
     const body = response.body;
-    if (response.status !== 200 || !isObj(body) || typeof body.access_token !== 'string') throw new UpstreamError(`Garmin token endpoint answered HTTP ${response.status}`);
+    if (response.status !== 200 || !isObj(body) || typeof body.access_token !== 'string')
+      throw new UpstreamError(`Garmin token endpoint answered HTTP ${response.status}`);
     return {
       accessToken: body.access_token,
       refreshToken: typeof body.refresh_token === 'string' ? body.refresh_token : null,

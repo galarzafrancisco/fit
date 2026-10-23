@@ -15,7 +15,10 @@ const filterShape = {
     .union([z.enum(SPORTS), z.array(z.enum(SPORTS)).min(1).max(SPORTS.length)])
     .optional()
     .describe(`One sport or a list. Values: ${SPORTS.join(', ')}`),
-  sportGroup: z.enum(SPORT_GROUP_NAMES as [string, ...string[]]).optional().describe(`Broader group: ${SPORT_GROUP_NAMES.join(', ')}`),
+  sportGroup: z
+    .enum(SPORT_GROUP_NAMES as [string, ...string[]])
+    .optional()
+    .describe(`Broader group: ${SPORT_GROUP_NAMES.join(', ')}`),
 };
 
 export const listActivitiesShape = {

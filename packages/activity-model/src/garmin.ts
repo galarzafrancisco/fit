@@ -103,7 +103,9 @@ export function mapGarminActivity(raw: unknown): NormalizedActivity {
     maxHeartRate: positive(raw.maxHeartRateInBeatsPerMinute),
     averagePowerWatts: positive(raw.averagePowerInWatts),
     averageCadence:
-      positive(raw.averageRunCadenceInStepsPerMinute) ?? positive(raw.averageBikeCadenceInRoundsPerMinute) ?? positive(raw.averageSwimCadenceInStrokesPerMinute),
+      positive(raw.averageRunCadenceInStepsPerMinute) ??
+      positive(raw.averageBikeCadenceInRoundsPerMinute) ??
+      positive(raw.averageSwimCadenceInStrokesPerMinute),
     calories: positive(raw.activeKilocalories),
     deviceName: str(raw.deviceName, 255),
     manual: bool(raw.manual) ?? false,

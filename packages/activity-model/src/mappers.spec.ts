@@ -1,4 +1,14 @@
-import { ActivityMappingError, canonicalJson, contentHash, garminSport, mapGarminActivity, mapStravaActivity, sportGroupOf, stravaSport, stravaTimezone } from './index';
+import {
+  ActivityMappingError,
+  canonicalJson,
+  contentHash,
+  garminSport,
+  mapGarminActivity,
+  mapStravaActivity,
+  sportGroupOf,
+  stravaSport,
+  stravaTimezone,
+} from './index';
 
 const stravaRun = {
   id: 12345678987654,

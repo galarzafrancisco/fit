@@ -5,7 +5,9 @@
   "description": "Provider-neutral activity model: sport taxonomy and Strava/Garmin normalizers. Pure TypeScript, no framework or I/O.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
