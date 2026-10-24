@@ -6,7 +6,7 @@ import { DomainError, ReauthorizationRequiredError, UpstreamError, UpstreamRateL
 import { APP_CONFIG, type AppConfig } from '../config/env.config';
 import { ProviderConnectionEntity } from '../connections/connection.entities';
 import { ConnectionsRepository } from '../connections/connections.repository';
-import { ConnectionsService } from '../connections/connections.service';
+import { ConnectionsService, SyncLeaseLostError } from '../connections/connections.service';
 import { UnitOfWork } from '../database/unit-of-work';
 import { ProviderAuthError } from '../providers/http';
 import { ProviderRegistry } from '../providers/provider-registry';
@@ -193,7 +193,7 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
     try {
       const adapter = this.registry.garmin;
       const call = <T>(work: (token: string) => Promise<T>): Promise<T> => this.request(fresh.id, holder, last, work);
-      holder.token = await this.connections.accessToken(fresh.id);
+      holder.token = await this.connections.accessToken(fresh.id, lease);
 
       let budget = this.config.maxPagesPerRun;
       const ingestPage = async (items: unknown[]) => {
@@ -364,17 +364,19 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
         return result;
       } catch (error) {
         if (error instanceof LeaseLost) throw error;
+        if (error instanceof SyncLeaseLostError) throw new LeaseLost(error.message);
         if (error instanceof ProviderAuthError) {
           if (replacedToken) {
             await this.connections.markNeedsReauth(
               connectionId,
               'Garmin rejected the access token obtained from your key; create a new personal API key and run connect_garmin again',
+              last.lease,
             );
             throw new KeyRejected('Garmin rejected the personal API key');
           }
           replacedToken = true;
-          await this.connections.discardAccessToken(connectionId);
-          holder.token = await this.connections.accessToken(connectionId);
+          await this.connections.discardAccessToken(connectionId, last.lease);
+          holder.token = await this.connections.accessToken(connectionId, last.lease);
           attempt--;
           continue;
         }

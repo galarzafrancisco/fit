@@ -407,6 +407,41 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
       await db.query(`UPDATE provider_connections SET next_sync_at = now() + interval '30 minutes' WHERE id = $1`, [id]);
     });
 
+    it('a stale worker whose request is rejected cannot discard credentials or mark the connection for reauth', async () => {
+      const repo = test.app.get(ConnectionsRepository);
+      const [{ id }] = await db.query(`SELECT id FROM provider_connections WHERE provider = 'garmin'`);
+      await db.query(
+        `UPDATE provider_connections SET sync_lock_until = NULL, sync_lock_token = NULL, backoff_until = NULL, next_sync_at = NULL WHERE id = $1`,
+        [id],
+      );
+      const read = async () =>
+        (
+          await db.query(
+            `SELECT status, api_key_enc, access_token_enc, access_token_expires_at, sync_cursor, next_sync_at, backoff_until, failure_count, history_offset, last_error, sync_lock_token FROM provider_connections WHERE id = $1`,
+            [id],
+          )
+        )[0];
+      await callTool(test, tokenA, 'refresh_garmin'); // makes sure a fresh access token is stored
+      await db.query(`UPDATE provider_connections SET sync_lock_until = NULL, sync_lock_token = NULL, next_sync_at = NULL WHERE id = $1`, [id]);
+      const before = await read();
+      expect(before.access_token_enc).not.toBeNull();
+      let tokenB: string | null = null;
+      // A's request is slow: its lease lapses and B takes over; then Garmin rejects A's request twice (delayed auth failures)
+      test.garmin.duringNextList = async () => {
+        await db.query(`UPDATE provider_connections SET sync_lock_until = now() - interval '1 second' WHERE id = $1`, [id]);
+        tokenB = await repo.claimSync(id, new Date(), new Date(Date.now() + 600_000));
+      };
+      test.garmin.failNext.push({ status: 401 }, { status: 401 });
+      const result = await callTool(test, tokenA, 'refresh_garmin');
+      expect(tokenB).toEqual(expect.any(String));
+      expect(result.data.status).toBe('failed');
+      expect(result.data.error).toMatch(/lease/);
+      // B's access token, key, status and scheduling state are untouched
+      expect(await read()).toEqual({ ...before, sync_lock_token: tokenB });
+      await repo.releaseSync(id, tokenB as unknown as string);
+      await db.query(`UPDATE provider_connections SET next_sync_at = now() + interval '30 minutes' WHERE id = $1`, [id]);
+    });
+
     it('requires a connected Garmin account', async () => {
       const result = await callTool(test, tokenB, 'refresh_garmin');
       expect(result.isError).toBe(true);

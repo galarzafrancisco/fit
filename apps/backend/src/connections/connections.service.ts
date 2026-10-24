@@ -67,6 +67,13 @@ export class ConnectCallbackError extends Error {
   }
 }
 
+/** A sync worker tried to change a connection after its lease passed to another holder; nothing was written */
+export class SyncLeaseLostError extends Error {
+  constructor() {
+    super('Garmin sync lease was lost');
+  }
+}
+
 @Injectable()
 export class ConnectionsService {
   private readonly logger = new Logger('ConnectionsService');
@@ -414,8 +421,9 @@ export class ConnectionsService {
    * about to expire. The refresh runs with the connection row locked, so two
    * concurrent callers never both spend a rotating refresh token.
    */
-  async accessToken(connectionId: string): Promise<string> {
+  async accessToken(connectionId: string, lease?: string): Promise<string> {
     const current = await this.repo.findById(connectionId);
+    if (lease && current && current.syncLockToken !== lease) throw new SyncLeaseLostError();
     if (!current || current.status !== 'active') throw new ReauthorizationRequiredError('The provider connection is not active; connect again');
     const cached = this.validToken(current);
     if (cached) return cached;
@@ -423,6 +431,7 @@ export class ConnectionsService {
     // The status change to needs_reauth must commit, so the transaction returns it instead of throwing
     const result = await this.uow.run(async (manager): Promise<{ token: string } | { reauth: string }> => {
       const connection = await this.repo.lockById(connectionId, manager);
+      if (lease && connection && connection.syncLockToken !== lease) throw new SyncLeaseLostError();
       if (!connection || connection.status !== 'active') return { reauth: 'The provider connection is not active; connect again' };
       const name = capitalize(connection.provider);
       const fresh = this.validToken(connection);
@@ -470,16 +479,19 @@ export class ConnectionsService {
   }
 
   /** The provider no longer accepts the user's credential: stop using it until the user connects again */
-  async markNeedsReauth(connectionId: string, reason: string): Promise<void> {
+  async markNeedsReauth(connectionId: string, reason: string, lease?: string): Promise<void> {
     await this.uow.run(async (manager) => {
       const connection = await this.repo.lockById(connectionId, manager);
+      if (lease && connection && connection.syncLockToken !== lease) throw new SyncLeaseLostError();
       if (connection && connection.status === 'active') await this.needsReauth(connection, reason, manager);
     });
   }
 
   /** The provider refused the cached access token: drop it so the next accessToken() obtains a fresh one */
-  async discardAccessToken(connectionId: string): Promise<void> {
-    await this.uow.manager.update(ProviderConnectionEntity, { id: connectionId }, { accessTokenEnc: null, accessTokenExpiresAt: null });
+  async discardAccessToken(connectionId: string, lease?: string): Promise<void> {
+    const where = lease ? { id: connectionId, syncLockToken: lease } : { id: connectionId };
+    const result = await this.uow.manager.update(ProviderConnectionEntity, where, { accessTokenEnc: null, accessTokenExpiresAt: null });
+    if (lease && !result.affected) throw new SyncLeaseLostError();
   }
 
   /** The user's connection for a provider, if it is usable for a sync */
