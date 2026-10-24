@@ -15,17 +15,19 @@ const checks = [
   ['freshness rejects a bare PR head checkout', /bare PR head/],
   ['has ci-gate job', /^\s{2}ci-gate:/m],
   ['ci-gate always runs', /ci-gate:[\s\S]*?if: always\(\)/],
-  ['ci-gate needs every job', /needs: \[merge-freshness, test, security, image\]/],
+  ['ci-gate needs every job', /needs: \[merge-freshness, test, security, image, manifests\]/],
   ['does not use pull_request_target', /^(?![\s\S]*pull_request_target)[\s\S]*$/],
   ['does not pin checkout to the PR head sha', /^(?![\s\S]*ref:\s*\$\{\{\s*github\.event\.pull_request\.head)[\s\S]*$/],
 ];
 const failures = checks.filter(([, re]) => !re.test(wf)).map(([name]) => name);
 assert.deepEqual(failures, [], `CI policy violated: ${failures.join('; ')}`);
 
-// Every job other than the gate must be listed in the gate's needs.
+// Every job other than the gate must be listed in the gate's needs, except the
+// post-merge release jobs (publish, deploy), which only run on push to main.
 const jobsSection = wf.slice(wf.indexOf('\njobs:'));
 const jobs = [...jobsSection.matchAll(/^ {2}([a-z][a-z-]*):\s*$/gm)].map((m) => m[1]).filter((j) => j !== 'services');
-const others = jobs.filter((j) => j !== 'ci-gate');
+const postMerge = ['publish', 'deploy'];
+const others = jobs.filter((j) => j !== 'ci-gate' && !postMerge.includes(j));
 assert.ok(others.length > 0, 'no jobs found');
 assert.ok(wf.includes(`needs: [${others.join(', ')}]`), `ci-gate.needs must list exactly: ${others.join(', ')}`);
 console.log('verify:ci-policy ok');
