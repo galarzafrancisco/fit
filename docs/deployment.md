@@ -12,7 +12,7 @@ root filesystem (only `/tmp` needs to be writable). Port `4190`.
 | `TOKEN_ENCRYPTION_KEY` | Secret. Losing or changing it forces every user to reconnect |
 | `TAICO_ISSUER`, `TAICO_AUTHORIZATION_SERVERS` | Taico registry entries `fit` (`/mcp`) and optionally `fit-api` (`/api`), see [mcp.md](mcp.md) |
 | `PUBLIC_BASE_URL` | https origin reachable by AI clients and providers |
-| Provider credentials | Secrets: `STRAVA_CLIENT_SECRET`, `STRAVA_WEBHOOK_SECRET`, `GARMIN_CLIENT_SECRET`, `GARMIN_WEBHOOK_SECRET` |
+| Provider credentials | Secrets: `STRAVA_CLIENT_SECRET`, `STRAVA_WEBHOOK_SECRET`. **Garmin needs none:** each user enters their own Personal API key via `connect_garmin` (stored encrypted in the database; no cluster secret) |
 
 Store secrets in the platform's secret store (e.g. a Kubernetes Secret
 managed in spark-ops, as money does); never in the repo or the image.
@@ -23,8 +23,6 @@ managed in spark-ops, as money does); never in the repo or the image.
 |---|---|
 | Strava app, Authorization Callback Domain | host of `PUBLIC_BASE_URL` |
 | Strava push subscription callback | `$PUBLIC_BASE_URL/webhooks/strava/$STRAVA_WEBHOOK_SECRET` |
-| Garmin app, OAuth redirect URI | `$PUBLIC_BASE_URL/connect/garmin/callback` |
-| Garmin Push/Ping endpoint | `$PUBLIC_BASE_URL/webhooks/garmin/$GARMIN_WEBHOOK_SECRET` |
 | Taico registry entry `fit` | `$PUBLIC_BASE_URL/mcp` |
 
 ## Operations
@@ -47,7 +45,7 @@ namespace `fit`. Host: `https://fit.american-broomstick.com` (Gateway
 
 Differences from money: port 4190; Postgres host port 15435; no browser
 sessions (so no session key); secret `fit-secrets` holds `TOKEN_ENCRYPTION_KEY`;
-optional secret `fit-providers` holds Strava/Garmin variables; no Up/market config.
+optional secret `fit-providers` holds Strava variables; no Up/market config.
 
 ### One-time prerequisites (manual, privileged)
 
@@ -91,4 +89,4 @@ roll back only to an image compatible with the current schema. Never rotate
 - Nothing has been deployed: validated so far by rendering manifests with
   kustomize and running the security/database checks in CI.
 - Pod memory request/limit are copied from money; measure after first deploy.
-- Strava/Garmin end-to-end needs the manual provider setup above.
+- Strava end-to-end needs the manual provider setup above. Garmin needs only a user's own key; keep `TOKEN_ENCRYPTION_KEY` stable, since rotating it makes stored Garmin keys unreadable (users run `connect_garmin` again).

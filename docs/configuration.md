@@ -41,14 +41,26 @@ Same rules as money.
 
 ## Garmin ([providers/garmin.md](providers/garmin.md))
 
+Garmin needs **no server-side credentials**: every user supplies their own
+Personal API key through `connect_garmin`; it is stored encrypted per user.
+These variables only tune endpoints and polling. Defaults are conservative
+because Garmin documents no rate limits for the Personal API.
+
 | Variable | Default | Notes |
 |---|---|---|
-| `GARMIN_CLIENT_ID` / `GARMIN_CLIENT_SECRET` | unset | From an approved Connect Developer Program app. Both or neither |
-| `GARMIN_WEBHOOK_SECRET` | unset | Last path segment of the Push/Ping URL registered with Garmin |
-| `GARMIN_AUTHORIZE_URL` | `https://connect.garmin.com/oauth2Confirm` | From Garmin's OAuth2 PKCE spec; configurable in case Garmin moves it |
-| `GARMIN_TOKEN_URL` | `https://diauth.garmin.com/di-oauth2-service/oauth/token` | Same |
-| `GARMIN_API_BASE_URL` | `https://apis.garmin.com` | Ping callback URLs must be on this host |
-| `GARMIN_BACKFILL_ON_CONNECT` | `true` | Request history when a user connects. Set `false` on a tier without historical data (Starter) |
+| `GARMIN_API_BASE_URL` | `https://personal.connectapi.garmin.com` | Override for tests only |
+| `GARMIN_POLLER_ENABLED` | `true` (`false` in tests) | Run the scheduled poller in this process |
+| `GARMIN_POLL_INTERVAL_MINUTES` | `30` | Time between polls of one user |
+| `GARMIN_TICK_INTERVAL_MS` | `60000` | How often the poller looks for due users. Also the base of the failure backoff and the delay between runs of a long history import |
+| `GARMIN_SYNC_CONCURRENCY` | `2` | Users synced at the same time |
+| `GARMIN_PAGE_SIZE` | `20` | Activities per list request |
+| `GARMIN_MAX_PAGES_PER_RUN` | `10` | Pages of the history walk per run; the walk resumes on the next run |
+| `GARMIN_HISTORY_MAX_ACTIVITIES` | `10000` | Stop the history import after this many activities (`0`: no limit) |
+| `GARMIN_MIN_REQUEST_INTERVAL_MS` | `1000` | Pause between two requests of one sync |
+| `GARMIN_MAX_RETRIES` | `3` | Retries of one request on network errors, 5xx and 429 |
+| `GARMIN_RETRY_BASE_MS` | `2000` | First retry delay, doubling per attempt; `Retry-After` wins |
+| `GARMIN_MAX_BACKOFF_MINUTES` | `120` | Cap for retry and failure backoff delays |
+| `GARMIN_MANUAL_MIN_INTERVAL_SECONDS` | `60` | `refresh_garmin` within this time of the last run returns that run instead of calling Garmin |
 
 ## Sync, OAuth and webhooks
 

@@ -54,9 +54,11 @@ server URL with OAuth. The server must be reachable over https from the client
 |---|---|---|
 | `whoami` | read | The Fit user behind the token |
 | `list_connections` | read | Per provider: available, status, last sync, last error, activity count |
-| `connect_provider` | write | Returns a one-time authorization URL for the user to open |
+| `connect_provider` | write | Strava: returns a one-time authorization URL for the user to open |
+| `connect_garmin` | write | Returns a single-use Fit link (`/connect/garmin?link=…`) where the user pastes their own Garmin Personal API key. The key never travels through MCP |
+| `refresh_garmin` | write | Sync Garmin now (new activities + continue history). Idempotent and rate-limit aware: returns the running/most recent run with a note instead of calling Garmin again |
 | `disconnect_provider` | destructive | Revoke access; optionally delete imported activities |
-| `sync_provider` | write | Catch up now (Strava pull; Garmin backfill request) |
+| `sync_provider` | write | Catch up now (Strava since the last sync; Garmin: same as `refresh_garmin`) |
 | `list_sync_runs` | read | Sync audit trail |
 | `list_webhook_events` | read | The user's recent provider events and their processing status |
 | `list_activities` | read | Filter by `from`/`to`, `provider`, `sport`/`sportGroup`, `search`, `minDistanceMeters`; cursor pagination |

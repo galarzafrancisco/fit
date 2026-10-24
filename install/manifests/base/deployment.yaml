@@ -57,8 +57,8 @@ spec:
                 name: fit-secrets
             # Optional, created manually by the operator once the provider apps
             # exist (docs/deployment.md): STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET,
-            # STRAVA_WEBHOOK_SECRET, STRAVA_WEBHOOK_SUBSCRIPTION_ID, GARMIN_CLIENT_ID,
-            # GARMIN_CLIENT_SECRET, GARMIN_WEBHOOK_SECRET. Absent: providers disabled.
+            # STRAVA_WEBHOOK_SECRET, STRAVA_WEBHOOK_SUBSCRIPTION_ID. Absent: Strava disabled.
+            # Garmin has no deployment secret: users supply their own Personal API key.
             - secretRef:
                 name: fit-providers
                 optional: true

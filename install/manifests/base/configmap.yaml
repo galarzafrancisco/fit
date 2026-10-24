@@ -19,6 +19,6 @@ data:
   DATABASE_MODE: postgres
   # Host-local connection without TLS, as provisioned by spark-ops.
   DATABASE_SSL: 'false'
-  # Strava/Garmin credentials and webhook secrets are NOT set here: they come
+  # Strava credentials and webhook secrets are NOT set here: they come
   # from the optional fit-providers Secret (see deployment.yaml). Without them
   # the providers are reported unavailable and the webhook endpoints answer 404.

@@ -8,7 +8,7 @@ src/
   activities/   entities, ingest (single write path), queries and summaries
   connections/  provider connections, OAuth state/PKCE, token vault and refresh, callback page
   providers/    ProviderAdapter port, Strava and Garmin adapters, HTTP helper
-  sync/         sync runs (Strava pull, Garmin backfill request)
+  sync/         sync runs (Strava pull, Garmin Personal API polling)
   webhooks/     inbox (authenticate + store), worker (claim, retry, dead-letter), handlers
   mcp/          per-request MCP server and controller
   api/          REST controller
