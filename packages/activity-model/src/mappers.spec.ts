@@ -109,60 +109,64 @@ describe('stravaTimezone / stravaSport', () => {
 });
 
 const garminRun = {
-  userId: 'garmin-user-1',
-  summaryId: '5001968355',
-  activityId: 5001968355,
-  activityName: 'Sydney Running',
-  activityType: 'RUNNING',
-  startTimeInSeconds: 1761000000,
-  startTimeOffsetInSeconds: 39600,
-  durationInSeconds: 3000,
-  distanceInMeters: 10000,
-  averageSpeedInMetersPerSecond: 3.33,
-  maxSpeedInMetersPerSecond: 4.9,
-  averageHeartRateInBeatsPerMinute: 150,
-  maxHeartRateInBeatsPerMinute: 176,
-  averageRunCadenceInStepsPerMinute: 170,
-  activeKilocalories: 690,
-  totalElevationGainInMeters: 40,
-  deviceName: 'forerunner965',
-  startingLatitudeInDegree: -33.86,
-  startingLongitudeInDegree: 151.2,
+  activityId: 21000000001,
+  activityName: 'Evening Run',
+  startTimeLocal: '2026-10-21 18:30:00',
+  startTimeGMT: '2026-10-21 07:30:00',
+  activityType: { typeId: 1, typeKey: 'running' },
+  distance: 10050.5,
+  duration: 3000.4,
+  elapsedDuration: 3100.9,
+  movingDuration: 2990.1,
+  elevationGain: 80,
+  averageSpeed: 3.35,
+  maxSpeed: 5,
+  averageHR: 150,
+  maxHR: 175,
+  avgPower: 0,
+  calories: 700,
+  averageRunningCadenceInStepsPerMinute: 168,
+  startLatitude: -33.86,
+  startLongitude: 151.2,
+  manufacturer: 'GARMIN',
+  manualActivity: false,
 };
 
-describe('mapGarminActivity', () => {
-  it('maps an activity summary', () => {
+describe('mapGarminActivity (Personal API activity list item)', () => {
+  it('maps the documented list fields', () => {
     expect(mapGarminActivity(garminRun)).toMatchObject({
       provider: 'garmin',
-      providerActivityId: '5001968355',
-      name: 'Sydney Running',
+      providerActivityId: '21000000001',
+      name: 'Evening Run',
       sport: 'run',
-      providerSportType: 'RUNNING',
-      startTime: new Date(1761000000 * 1000).toISOString(),
-      startTimeLocal: new Date((1761000000 + 39600) * 1000).toISOString().replace(/\.\d{3}Z$/, ''),
+      providerSportType: 'running',
+      startTime: '2026-10-21T07:30:00.000Z',
+      startTimeLocal: '2026-10-21T18:30:00',
       utcOffsetSeconds: 39600,
-      elapsedTimeSeconds: 3000,
-      distanceMeters: 10000,
-      averageCadence: 170,
-      calories: 690,
-      private: null,
+      elapsedTimeSeconds: 3100.9,
+      movingTimeSeconds: 2990.1,
+      distanceMeters: 10050.5,
+      averageHeartRate: 150,
+      averagePowerWatts: null,
+      averageCadence: 168,
+      calories: 700,
+      deviceName: 'GARMIN',
+      manual: false,
+      startLatitude: -33.86,
     });
   });
 
-  it('falls back to activityId and maps unknown types to other', () => {
-    const activity = mapGarminActivity({ ...garminRun, summaryId: undefined, activityType: 'SKY_DIVING' });
-    expect(activity.providerActivityId).toBe('5001968355');
-    expect(activity.sport).toBe('other');
+  it('maps unknown types to other and keeps the Garmin type', () => {
+    const a = mapGarminActivity({ ...garminRun, activityType: { typeKey: 'pickleball' } });
+    expect(a.sport).toBe('other');
+    expect(a.providerSportType).toBe('pickleball');
+    expect(garminSport('trail_running')).toBe('trail_run');
   });
 
-  it('refuses payloads without an id or start', () => {
-    expect(() => mapGarminActivity({ ...garminRun, summaryId: undefined, activityId: undefined })).toThrow(ActivityMappingError);
-    expect(() => mapGarminActivity({ ...garminRun, startTimeInSeconds: undefined })).toThrow(/startTimeInSeconds/);
-  });
-
-  it('maps sport types case-insensitively', () => {
-    expect(garminSport('lap_swimming')).toBe('swim');
-    expect(garminSport('OPEN_WATER_SWIMMING')).toBe('open_water_swim');
+  it('refuses items without an id or a GMT start', () => {
+    expect(() => mapGarminActivity(null)).toThrow(ActivityMappingError);
+    expect(() => mapGarminActivity({ ...garminRun, activityId: undefined })).toThrow(/no activityId/);
+    expect(() => mapGarminActivity({ ...garminRun, startTimeGMT: 'soon' })).toThrow(/no startTimeGMT/);
   });
 });
 
