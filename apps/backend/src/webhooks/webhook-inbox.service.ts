@@ -1,11 +1,10 @@
-import { contentHash, type Provider } from '@fit/activity-model';
+import { type Provider } from '@fit/activity-model';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { DomainError } from '../common/errors';
 import { safeEqual } from '../common/secrets';
 import { APP_CONFIG, type AppConfig } from '../config/env.config';
-import { scrubPayload } from '../activities/activity-ingest.service';
 import { UnitOfWork } from '../database/unit-of-work';
 import { WebhookDeliveryEntity } from './webhook-delivery.entity';
 
@@ -31,23 +30,6 @@ export const stravaEventSchema = z.object({
   updates: z.record(z.string(), z.unknown()).optional(),
 });
 export type StravaEvent = z.infer<typeof stravaEventSchema>;
-
-/** Garmin pushes one object with lists per summary type; each item names its Garmin user */
-const garminItem = z.looseObject({ userId: z.string().min(1).max(128) });
-const garminBody = z.looseObject({
-  activities: z.array(garminItem).max(1000).optional(),
-  manuallyUpdatedActivities: z.array(garminItem).max(1000).optional(),
-  deregistrations: z.array(garminItem).max(1000).optional(),
-  userPermissionsChange: z.array(garminItem).max(1000).optional(),
-});
-
-/** Garmin list name → Fit event type */
-const GARMIN_LISTS = {
-  activities: 'garmin.activity',
-  manuallyUpdatedActivities: 'garmin.activity',
-  deregistrations: 'garmin.deregistration',
-  userPermissionsChange: 'garmin.permissions',
-} as const;
 
 export type ReceiveResult = { received: number; duplicates: number };
 
@@ -101,32 +83,6 @@ export class WebhookInboxService {
       payload: body as Record<string, unknown>,
     });
     return { received: 1, duplicates: stored ? 0 : 1 };
-  }
-
-  async receiveGarmin(pathSecret: string, body: unknown): Promise<ReceiveResult> {
-    this.checkSecret(this.config.garmin.webhookSecret, pathSecret);
-    const parsed = garminBody.safeParse(body);
-    if (!parsed.success) throw new WebhookMalformedError('Not a Garmin notification');
-    let received = 0;
-    let duplicates = 0;
-    for (const [list, type] of Object.entries(GARMIN_LISTS) as Array<[keyof typeof GARMIN_LISTS, string]>) {
-      for (const item of parsed.data[list] ?? []) {
-        const payload = scrubPayload(item);
-        const eventType = type === 'garmin.activity' && typeof payload.callbackURL === 'string' ? 'garmin.activity_ping' : type;
-        const stored = await this.store({
-          provider: 'garmin',
-          eventKey: `garmin:${eventType}:${item.userId}:${contentHash(payload)}`,
-          eventType,
-          externalUserId: item.userId,
-          payload,
-        });
-        received++;
-        if (!stored) duplicates++;
-      }
-    }
-    const unknown = Object.keys(parsed.data).filter((key) => !(key in GARMIN_LISTS));
-    if (unknown.length) this.logger.log(`Garmin notification lists not handled: ${unknown.join(', ')}`);
-    return { received, duplicates };
   }
 
   /** Webhook events routed to this user, newest first (observability for the user and their AI client) */

@@ -8,7 +8,7 @@ federated to Taico, as in [money](https://github.com/galarzafrancisco/money).
 ```
 Claude / ChatGPT ──MCP (Taico token)──► Fit /mcp ─┐
                                                   ├─► activities (Postgres)
-Strava / Garmin ──OAuth, webhooks, sync──► Fit ───┘
+Strava (OAuth, webhooks) / Garmin (own API key, polling) ──► Fit ───┘
 ```
 
 ## Quick start
@@ -45,6 +45,6 @@ docs/                     architecture, configuration, providers, MCP, CI, deplo
 
 Start with [AGENTS.md](AGENTS.md) (rules and boundaries) and
 [docs/README.md](docs/README.md) (index). Provider limitations, especially
-Garmin's approval-based program, are in [docs/providers/](docs/providers/).
+the Garmin Personal API's personal-use restriction, are in [docs/providers/](docs/providers/).
 
 Requires Node >= 20 (CI and the image use Node 24).

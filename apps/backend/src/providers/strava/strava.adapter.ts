@@ -17,6 +17,7 @@ const isObj = (value: unknown): value is Obj => typeof value === 'object' && val
 export class StravaAdapter implements ProviderAdapter {
   readonly provider = 'strava' as const;
   readonly syncMode = 'pull' as const;
+  readonly authKind = 'oauth' as const;
   readonly usesPkce = false;
   /** activity:read_all also covers "Only You" activities; activity:read alone is accepted too */
   readonly requiredScopes = ['activity:read'];

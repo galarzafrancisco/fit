@@ -28,14 +28,17 @@ export type ActivityPage = {
  * (providers/<name>/<name>.adapter.ts) that owns its URLs, payload shapes
  * and quirks; nothing outside the adapter knows a provider's API.
  *
- * `pull` providers (Strava) are synced by listing activities. `push`
- * providers (Garmin) deliver activities by webhook; a sync asks them to
- * re-send history instead.
+ * Both providers are synced by listing activities (`pull`). Strava also
+ * pushes events by webhook. Garmin's Personal API has no OAuth and no push:
+ * a user-supplied API key is exchanged for a short-lived token and the
+ * activity list is polled (`authKind: 'api_key'`).
  */
 export interface ProviderAdapter {
   readonly provider: Provider;
-  readonly syncMode: 'pull' | 'push';
-  /** Credentials are configured on this server */
+  readonly syncMode: 'pull';
+  /** oauth: the user approves Fit in a browser. api_key: the user supplies a personal API key (Garmin Personal API) */
+  readonly authKind: 'oauth' | 'api_key';
+  /** The provider can be used on this server (Strava needs client credentials; Garmin needs none) */
   readonly configured: boolean;
   /** PKCE (S256) is used in the authorization request */
   readonly usesPkce: boolean;
@@ -56,8 +59,6 @@ export interface ProviderAdapter {
   listActivities?(accessToken: string, input: { after: Date; before: Date; page: number; pageSize: number }): Promise<ActivityPage>;
   /** pull providers: the current state of one activity, or null when it no longer exists or is no longer visible */
   fetchActivity?(accessToken: string, providerActivityId: string): Promise<unknown | null>;
-  /** push providers: asks the provider to push activities that started in [after, before) */
-  requestBackfill?(accessToken: string, input: { after: Date; before: Date }): Promise<void>;
 }
 
 export const PROVIDER_ADAPTERS = Symbol('PROVIDER_ADAPTERS');

@@ -15,10 +15,9 @@ REST API (`/api`).
 
 - Fit **only reads** from providers. It never creates, edits or deletes
   anything on Strava or Garmin. The only write-like calls are OAuth token
-  exchange/refresh, deauthorization/deregistration when the user disconnects,
-  and Garmin backfill requests.
+  exchange/refresh and deauthorization when the user disconnects.
 - Providers are reached **only through official APIs** with the user's own
-  OAuth grant: no scraping, no stored passwords, no unofficial endpoints. A new
+  grant (Strava OAuth; Garmin: the user's own Personal API key, never shared): no scraping, no stored passwords, no unofficial endpoints. A new
   provider needs an adapter behind `ProviderAdapter` and explicit approval.
 - Authentication is **federated to Taico** through the published
   `@taico/auth` package, as in money. Fit has no local login, passwords or sign-up.

@@ -1,11 +1,11 @@
 import type { Provider } from '@fit/activity-model';
 import { Column, Entity, Index, PrimaryColumn } from 'typeorm';
 
-export const SYNC_TRIGGERS = ['connect', 'manual'] as const;
+export const SYNC_TRIGGERS = ['connect', 'manual', 'scheduled'] as const;
 export type SyncTrigger = (typeof SYNC_TRIGGERS)[number];
 
 export const SYNC_KINDS = ['initial', 'incremental', 'backfill_request'] as const;
-/** backfill_request: Garmin only. Fit asks Garmin to push history; the data arrives later by webhook */
+/** backfill_request: legacy (Garmin Developer Program); no longer produced */
 export type SyncKind = (typeof SYNC_KINDS)[number];
 
 export const SYNC_STATUSES = ['running', 'succeeded', 'partial', 'failed'] as const;

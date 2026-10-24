@@ -1,8 +1,8 @@
-import { bool, id, isObject, latLng, nonNegative, num, positive, str } from './fields';
+import { bool, id, isObject, latLng, nonNegative, positive, str } from './fields';
 import { ActivityMappingError, type NormalizedActivity, type Sport } from './model';
 
 /**
- * Garmin Activity API `activityType` → Fit sport. Garmin's list is long and
+ * Garmin `activityType.typeKey` (upper-cased) → Fit sport. Garmin's list is long and
  * grows; anything unknown maps to "other" and keeps its original type.
  */
 const GARMIN_SPORTS: Record<string, Sport> = {
@@ -60,56 +60,62 @@ export function garminSport(activityType: string | null): Sport {
   return (activityType && GARMIN_SPORTS[activityType.toUpperCase()]) || 'other';
 }
 
-/** The local wall-clock time of a UTC instant shifted by an offset, ISO 8601 without zone */
-function wallClock(epochSeconds: number, offsetSeconds: number | null): string | null {
-  if (offsetSeconds === null) return null;
-  return new Date((epochSeconds + offsetSeconds) * 1000).toISOString().replace(/\.\d{3}Z$/, '');
+/** Garmin timestamps in activity lists look like "2026-08-24 06:30:00" (no zone). Returns epoch seconds, reading the text as UTC */
+function parseNaive(value: unknown): number | null {
+  if (typeof value !== 'string') return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?$/.exec(value.trim());
+  if (!m) return null;
+  return Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!) / 1000;
 }
 
 /**
- * Maps a Garmin Activity API activity summary (as delivered by Push, or
- * returned by a Ping callback URL) to a Fit activity. The provider ID is
- * Garmin's `summaryId`, the key Garmin uses for de-duplication; `activityId`
- * stays available in the raw payload.
+ * Maps one item of the Garmin Connect Personal API activity list
+ * (`GET /activitylist-service/activities/search/activities`) to a Fit
+ * activity. The provider ID is Garmin's numeric `activityId`. Fields are read
+ * defensively: anything missing or mistyped becomes null. The Personal API
+ * does not publish response schemas in a machine-readable form, so field
+ * names follow the Garmin Connect activity summary and are covered by
+ * fixtures (see docs/providers/garmin.md).
  */
 export function mapGarminActivity(raw: unknown): NormalizedActivity {
   if (!isObject(raw)) throw new ActivityMappingError('Garmin activity is not an object');
-  const providerActivityId = id(raw.summaryId) ?? id(raw.activityId);
-  if (!providerActivityId) throw new ActivityMappingError('Garmin activity has no summaryId');
-  const startSeconds = num(raw.startTimeInSeconds);
-  if (startSeconds === null) throw new ActivityMappingError(`Garmin activity ${providerActivityId} has no startTimeInSeconds`);
-  const offset = num(raw.startTimeOffsetInSeconds);
-  const providerSportType = str(raw.activityType, 64);
-  const start = latLng(raw.startingLatitudeInDegree, raw.startingLongitudeInDegree);
-  const duration = nonNegative(raw.durationInSeconds);
+  const providerActivityId = id(raw.activityId);
+  if (!providerActivityId) throw new ActivityMappingError('Garmin activity has no activityId');
+  const gmt = parseNaive(raw.startTimeGMT);
+  if (gmt === null) throw new ActivityMappingError(`Garmin activity ${providerActivityId} has no startTimeGMT`);
+  const local = parseNaive(raw.startTimeLocal);
+  const offset = local === null ? null : local - gmt;
+  const typeKey = isObject(raw.activityType) ? str(raw.activityType.typeKey, 64) : str(raw.activityType, 64);
+  const start = latLng(raw.startLatitude, raw.startLongitude);
+  const duration = nonNegative(raw.elapsedDuration) ?? nonNegative(raw.duration);
 
   return {
     provider: 'garmin',
     providerActivityId,
-    name: str(raw.activityName, 500) ?? str(raw.activityDescription, 500),
-    sport: garminSport(providerSportType),
-    providerSportType,
-    startTime: new Date(startSeconds * 1000).toISOString(),
-    startTimeLocal: wallClock(startSeconds, offset),
+    name: str(raw.activityName, 500),
+    sport: garminSport(typeKey),
+    providerSportType: typeKey,
+    startTime: new Date(gmt * 1000).toISOString(),
+    startTimeLocal: local === null ? null : new Date(local * 1000).toISOString().replace(/\.\d{3}Z$/, ''),
     timezone: null,
     utcOffsetSeconds: offset,
     elapsedTimeSeconds: duration,
-    movingTimeSeconds: nonNegative(raw.movingDurationInSeconds),
-    distanceMeters: nonNegative(raw.distanceInMeters),
-    elevationGainMeters: nonNegative(raw.totalElevationGainInMeters),
-    averageSpeedMps: nonNegative(raw.averageSpeedInMetersPerSecond),
-    maxSpeedMps: nonNegative(raw.maxSpeedInMetersPerSecond),
-    averageHeartRate: positive(raw.averageHeartRateInBeatsPerMinute),
-    maxHeartRate: positive(raw.maxHeartRateInBeatsPerMinute),
-    averagePowerWatts: positive(raw.averagePowerInWatts),
+    movingTimeSeconds: nonNegative(raw.movingDuration),
+    distanceMeters: nonNegative(raw.distance),
+    elevationGainMeters: nonNegative(raw.elevationGain),
+    averageSpeedMps: nonNegative(raw.averageSpeed),
+    maxSpeedMps: nonNegative(raw.maxSpeed),
+    averageHeartRate: positive(raw.averageHR),
+    maxHeartRate: positive(raw.maxHR),
+    averagePowerWatts: positive(raw.avgPower),
     averageCadence:
-      positive(raw.averageRunCadenceInStepsPerMinute) ??
-      positive(raw.averageBikeCadenceInRoundsPerMinute) ??
+      positive(raw.averageRunningCadenceInStepsPerMinute) ??
+      positive(raw.averageBikingCadenceInRevPerMinute) ??
       positive(raw.averageSwimCadenceInStrokesPerMinute),
-    calories: positive(raw.activeKilocalories),
-    deviceName: str(raw.deviceName, 255),
-    manual: bool(raw.manual) ?? false,
-    private: null,
+    calories: positive(raw.calories),
+    deviceName: str(raw.deviceName, 255) ?? str(raw.manufacturer, 255),
+    manual: bool(raw.manualActivity) ?? false,
+    private: bool(raw.privacy) ?? null,
     startLatitude: start.lat,
     startLongitude: start.lng,
   };

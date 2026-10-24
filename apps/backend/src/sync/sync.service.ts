@@ -1,4 +1,4 @@
-import { ActivityMappingError, type Provider } from '@fit/activity-model';
+import { ActivityMappingError } from '@fit/activity-model';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { MoreThan } from 'typeorm';
@@ -8,11 +8,15 @@ import { ConflictError, DomainError, ReauthorizationRequiredError, UpstreamRateL
 import { dateOrInstant, parseInput } from '../common/validation';
 import { APP_CONFIG, type AppConfig } from '../config/env.config';
 import type { ProviderConnectionEntity } from '../connections/connection.entities';
-import { ConnectionsService, capitalize, providerSchema } from '../connections/connections.service';
+import { ConnectionsService, providerSchema } from '../connections/connections.service';
 import { UnitOfWork } from '../database/unit-of-work';
 import { ProviderRegistry } from '../providers/provider-registry';
 import type { CurrentUser } from '../users/users.service';
+import { GarminSyncService } from './garmin-sync.service';
 import { SyncRunEntity, type SyncTrigger } from './sync-run.entity';
+import { toSyncRunView as toView, type SyncRunView } from './sync-run.view';
+
+export type { SyncRunView };
 
 export const syncShape = {
   provider: providerSchema,
@@ -26,33 +30,12 @@ export const listSyncRunsShape = {
 };
 const listSyncRunsSchema = z.object(listSyncRunsShape);
 
-export type SyncRunView = {
-  id: string;
-  provider: Provider;
-  trigger: string;
-  kind: string;
-  status: string;
-  windowStart: string | null;
-  windowEnd: string | null;
-  pages: number;
-  fetched: number;
-  created: number;
-  updated: number;
-  unchanged: number;
-  skipped: number;
-  error: string | null;
-  startedAt: string;
-  finishedAt: string | null;
-  note?: string;
-};
-
 /** A run older than this that still says "running" is assumed dead (process restart) and does not block a new one */
 const RUNNING_TIMEOUT_MS = 15 * 60_000;
 
 /**
- * Imports history and catches up. Strava (pull): pages through
- * /athlete/activities for a time window. Garmin (push): asks Garmin to push
- * history, which arrives through the webhook. Every run is recorded in
+ * Imports history and catches up. Strava: pages through
+ * /athlete/activities for a time window. Garmin is handled by GarminSyncService (Personal API polling). Every run is recorded in
  * sync_runs with its counts and error. Webhooks keep data current between runs.
  */
 @Injectable()
@@ -66,18 +49,19 @@ export class SyncService {
     private readonly registry: ProviderRegistry,
     private readonly ingest: ActivityIngestService,
     private readonly uow: UnitOfWork,
+    private readonly garmin: GarminSyncService,
   ) {}
 
   async syncForUser(user: CurrentUser, input: unknown): Promise<SyncRunView> {
     const { provider, since } = parseInput(syncSchema, input);
+    if (provider === 'garmin') return this.garmin.syncNow(user);
     const connection = await this.connections.activeConnection(user, provider);
     return this.run(connection, 'manual', since ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(since) ? `${since}T00:00:00Z` : since) : null);
   }
 
   /** Starts the first sync after connecting without blocking the callback page. Errors land in sync_runs */
   startInitialSync(connection: ProviderConnectionEntity): void {
-    // Garmin history arrives only through a backfill request; some tiers have none
-    if (connection.provider === 'garmin' && !this.config.garmin.backfillOnConnect) return;
+    if (connection.provider === 'garmin') return this.garmin.startInitialSync(connection);
     const promise = this.run(connection, 'connect', null)
       .catch((error) => this.logger.warn(`Initial ${connection.provider} sync failed: ${(error as Error).message}`))
       .finally(() => this.background.delete(promise));
@@ -87,6 +71,7 @@ export class SyncService {
   /** Resolves when background syncs have finished (tests, graceful shutdown) */
   async idle(): Promise<void> {
     while (this.background.size) await Promise.allSettled([...this.background]);
+    await this.garmin.idle();
   }
 
   async listRuns(user: CurrentUser, input: unknown): Promise<SyncRunView[]> {
@@ -119,7 +104,7 @@ export class SyncService {
       connectionId: connection.id,
       provider: connection.provider,
       trigger,
-      kind: adapter.syncMode === 'push' ? 'backfill_request' : firstSync ? 'initial' : 'incremental',
+      kind: firstSync ? 'initial' : 'incremental',
       status: 'running',
       windowStart: after,
       windowEnd: now,
@@ -138,41 +123,35 @@ export class SyncService {
     let note: string | undefined;
     try {
       const token = await this.connections.accessToken(connection.id);
-      if (adapter.syncMode === 'push') {
-        await adapter.requestBackfill!(token, { after, before: now });
-        note = `${capitalize(connection.provider)} accepted the history request; activities arrive by webhook over the next minutes.`;
-        run.status = 'succeeded';
-      } else {
-        const pageSize = this.config.sync.pageSize;
-        let hasMore = true;
-        for (let page = 1; hasMore && page <= this.config.sync.maxPages; page++) {
-          const result = await adapter.listActivities!(token, { after, before: now, page, pageSize });
-          run.pages = page;
-          hasMore = result.hasMore;
-          for (const item of result.items) {
-            run.fetched++;
-            try {
-              const { outcome } = await this.ingest.ingest({
-                userId: connection.userId,
-                connectionId: connection.id,
-                provider: connection.provider,
-                raw: item,
-                source: 'sync',
-              });
-              run[outcome]++;
-            } catch (error) {
-              if (!(error instanceof ActivityMappingError)) throw error;
-              run.skipped++;
-              run.error = `Skipped unreadable activity: ${error.message}`;
-            }
+      const pageSize = this.config.sync.pageSize;
+      let hasMore = true;
+      for (let page = 1; hasMore && page <= this.config.sync.maxPages; page++) {
+        const result = await adapter.listActivities!(token, { after, before: now, page, pageSize });
+        run.pages = page;
+        hasMore = result.hasMore;
+        for (const item of result.items) {
+          run.fetched++;
+          try {
+            const { outcome } = await this.ingest.ingest({
+              userId: connection.userId,
+              connectionId: connection.id,
+              provider: connection.provider,
+              raw: item,
+              source: 'sync',
+            });
+            run[outcome]++;
+          } catch (error) {
+            if (!(error instanceof ActivityMappingError)) throw error;
+            run.skipped++;
+            run.error = `Skipped unreadable activity: ${error.message}`;
           }
         }
-        if (hasMore) {
-          run.status = 'partial';
-          run.error = `Stopped after ${this.config.sync.maxPages} pages (SYNC_MAX_PAGES); run the sync again to continue`;
-        } else {
-          run.status = 'succeeded';
-        }
+      }
+      if (hasMore) {
+        run.status = 'partial';
+        run.error = `Stopped after ${this.config.sync.maxPages} pages (SYNC_MAX_PAGES); run the sync again to continue`;
+      } else {
+        run.status = 'succeeded';
       }
     } catch (error) {
       const message = error instanceof DomainError ? error.message : `Unexpected error: ${(error as Error).message}`;
@@ -192,25 +171,4 @@ export class SyncService {
     });
     return { ...toView(run), ...(note ? { note } : {}) };
   }
-}
-
-function toView(run: SyncRunEntity): SyncRunView {
-  return {
-    id: run.id,
-    provider: run.provider,
-    trigger: run.trigger,
-    kind: run.kind,
-    status: run.status,
-    windowStart: run.windowStart?.toISOString() ?? null,
-    windowEnd: run.windowEnd?.toISOString() ?? null,
-    pages: run.pages,
-    fetched: run.fetched,
-    created: run.created,
-    updated: run.updated,
-    unchanged: run.unchanged,
-    skipped: run.skipped,
-    error: run.error,
-    startedAt: run.startedAt.toISOString(),
-    finishedAt: run.finishedAt?.toISOString() ?? null,
-  };
 }

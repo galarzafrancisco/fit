@@ -6,10 +6,11 @@ import { AuthExceptionFilter, AuthModule } from '@taico/auth/nest';
 import { ActivitiesService } from './activities/activities.service';
 import { ActivityIngestService } from './activities/activity-ingest.service';
 import { ApiController } from './api/api.controller';
-import { createFitResourceServer, protectedResources } from './auth/auth.setup';
+import { RESOURCE_SERVER, createFitResourceServer, protectedResources } from './auth/auth.setup';
 import { FitUserGuard } from './auth/user.guard';
 import { DomainErrorFilter } from './common/domain-error.filter';
 import { APP_CONFIG, type AppConfig } from './config/env.config';
+import { AUTH_FETCH, BrowserLoginService } from './connections/browser-login.service';
 import { ConnectCallbackController } from './connections/connect-callback.controller';
 import { ConnectionsRepository } from './connections/connections.repository';
 import { ConnectionsService } from './connections/connections.service';
@@ -21,6 +22,7 @@ import { McpController } from './mcp/mcp.controller';
 import { FitMcpServerFactory } from './mcp/fit-mcp.server';
 import { ProviderRegistry, createProviderAdapters } from './providers/provider-registry';
 import { PROVIDER_ADAPTERS } from './providers/provider.port';
+import { GarminSyncService } from './sync/garmin-sync.service';
 import { SyncService } from './sync/sync.service';
 import { UsersRepository } from './users/users.repository';
 import { UsersService } from './users/users.service';
@@ -35,6 +37,8 @@ export type AppModuleOptions = {
   jwks?: JwksSource;
   /** Overrides how Fit reaches Strava and Garmin (tests stand in fake providers) */
   providerFetch?: typeof fetch;
+  /** Overrides how Fit reaches Taico's authorization server for the browser sign-in (tests stand in a fake) */
+  authFetch?: typeof fetch;
 };
 
 @Global()
@@ -58,6 +62,9 @@ export class AppModule {
         { provide: APP_FILTER, useClass: AuthExceptionFilter },
         { provide: APP_FILTER, useClass: DomainErrorFilter },
         { provide: PROVIDER_ADAPTERS, useFactory: () => createProviderAdapters(config, options.providerFetch ?? fetch) },
+        { provide: RESOURCE_SERVER, useValue: resourceServer },
+        { provide: AUTH_FETCH, useValue: options.authFetch ?? fetch },
+        BrowserLoginService,
         UnitOfWork,
         UsersRepository,
         UsersService,
@@ -69,6 +76,7 @@ export class AppModule {
         ActivityIngestService,
         ActivitiesService,
         SyncService,
+        GarminSyncService,
         WebhookInboxService,
         WebhookHandlers,
         WebhookWorker,

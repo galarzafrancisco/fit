@@ -6,7 +6,8 @@ access. Endpoints:
 | Provider | Method and path |
 |---|---|
 | Strava | `GET /webhooks/strava/:secret` (subscription validation), `POST /webhooks/strava/:secret` (events) |
-| Garmin | `POST /webhooks/garmin/:secret` (Push and Ping, all summary types) |
+
+Garmin has no webhooks: the Personal API documents no push mechanism, so Garmin is polled ([providers/garmin.md](providers/garmin.md)).
 
 They are **not** behind Taico auth (providers have no Taico token).
 
@@ -28,8 +29,7 @@ provider ─POST─► WebhooksController ─► WebhookInboxService
 ```
 
 - **Idempotency.** `event_key` is unique: Strava
-  `subscription:object_type:object_id:aspect_type:event_time`; Garmin
-  `type:userId:sha256(item)`. Redeliveries are stored once and counted as
+  `subscription:object_type:object_id:aspect_type:event_time`. Redeliveries are stored once and counted as
   duplicates. Processing is idempotent too (ingest by provider ID and payload hash).
 - **Durability.** Events are stored before the 200, so a crash after
   acknowledging loses nothing; `processing` claims older than

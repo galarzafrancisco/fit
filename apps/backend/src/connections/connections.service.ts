@@ -2,7 +2,7 @@ import { isProvider, type Provider } from '@fit/activity-model';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { ConflictError, NotFoundError, ReauthorizationRequiredError } from '../common/errors';
+import { ConflictError, NotFoundError, ReauthorizationRequiredError, ValidationError } from '../common/errors';
 import { randomSecret, sha256 } from '../common/secrets';
 import { parseInput } from '../common/validation';
 import { APP_CONFIG, type AppConfig } from '../config/env.config';
@@ -10,6 +10,7 @@ import { UnitOfWork } from '../database/unit-of-work';
 import { ProviderAuthError } from '../providers/http';
 import { ProviderRegistry } from '../providers/provider-registry';
 import type { TokenGrant } from '../providers/provider.port';
+import { UsersRepository } from '../users/users.repository';
 import type { CurrentUser } from '../users/users.service';
 import { OAuthStateEntity, ProviderConnectionEntity } from './connection.entities';
 import { ConnectionsRepository } from './connections.repository';
@@ -37,7 +38,9 @@ export type ConnectionView = {
   /** Credentials for this provider are configured on the server */
   available: boolean;
   /** "pull": Fit lists activities; "push": the provider sends them by webhook */
-  syncMode: 'pull' | 'push';
+  syncMode: 'pull';
+  /** "oauth": approved in a browser (Strava). "api_key": the user's own personal API key (Garmin Personal API) */
+  authMethod: 'oauth' | 'api_key';
   connected: boolean;
   status: ProviderConnectionEntity['status'] | 'not_connected';
   externalUserId: string | null;
@@ -46,6 +49,11 @@ export type ConnectionView = {
   connectedAt: string | null;
   lastSyncAt: string | null;
   syncCursor: string | null;
+  /** Garmin: progress of the newest-first history import */
+  history: { complete: boolean; activitiesWalked: number } | null;
+  /** Garmin: when the next scheduled poll is due, and any rate-limit/error backoff in effect */
+  nextSyncAt: string | null;
+  backoffUntil: string | null;
   lastError: string | null;
   lastErrorAt: string | null;
   activityCount: number;
@@ -59,6 +67,13 @@ export class ConnectCallbackError extends Error {
   }
 }
 
+/** A sync worker tried to change a connection after its lease passed to another holder; nothing was written */
+export class SyncLeaseLostError extends Error {
+  constructor() {
+    super('Garmin sync lease was lost');
+  }
+}
+
 @Injectable()
 export class ConnectionsService {
   private readonly logger = new Logger('ConnectionsService');
@@ -69,13 +84,14 @@ export class ConnectionsService {
     private readonly registry: ProviderRegistry,
     private readonly vault: TokenVault,
     private readonly uow: UnitOfWork,
+    private readonly users: UsersRepository,
   ) {}
 
   async list(user: CurrentUser): Promise<ConnectionView[]> {
     const [connections, counts] = await Promise.all([this.repo.listForUser(user.id), this.repo.activityCounts(user.id)]);
     return this.registry.all().map((adapter) => {
       const connection = connections.find((c) => c.provider === adapter.provider) ?? null;
-      return toView(adapter.provider, adapter.configured, adapter.syncMode, connection, counts.get(adapter.provider) ?? 0);
+      return toView(adapter.provider, adapter.configured, adapter.syncMode, adapter.authKind, connection, counts.get(adapter.provider) ?? 0);
     });
   }
 
@@ -95,6 +111,7 @@ export class ConnectionsService {
   ): Promise<{ provider: Provider; authorizationUrl: string; expiresAt: string; instructions: string }> {
     const provider = parseInput(providerSchema, providerInput);
     const adapter = this.registry.get(provider);
+    if (adapter.authKind !== 'oauth') throw new ValidationError(`${capitalize(provider)} uses a personal API key, not an OAuth approval. Use connect_garmin`);
     // Throws not_configured, naming the variables and docs, when credentials are missing
     adapter.assertConfigured();
     await this.repo.purgeExpiredStates();
@@ -137,6 +154,7 @@ export class ConnectionsService {
     if (!isProvider(input.provider)) throw new ConnectCallbackError('Unknown provider.');
     const provider = input.provider;
     const adapter = this.registry.get(provider);
+    if (adapter.authKind !== 'oauth') throw new ConnectCallbackError(`${capitalize(provider)} does not use this sign-in flow.`);
     if (!input.state || input.state.length > 200)
       throw new ConnectCallbackError('The sign-in link is missing its state. Start connecting again from your AI assistant.');
     const state = await this.repo.consumeState(sha256(input.state));
@@ -211,6 +229,137 @@ export class ConnectionsService {
     return { connection, userId: state.userId };
   }
 
+  /**
+   * Garmin Personal API: creates the single-use link the authenticated user
+   * opens to enter their own API key. The link is created here, behind the
+   * MCP/REST bearer-token check, so the token identifies the Fit user
+   * (issuer + subject) server-side; no user ID travels in the URL. Only the
+   * SHA-256 of the link token is stored.
+   */
+  async startGarminLink(user: CurrentUser): Promise<{ provider: 'garmin'; connectUrl: string; expiresAt: string; instructions: string }> {
+    await this.repo.purgeExpiredStates();
+    const token = randomSecret(32);
+    const row = Object.assign(new OAuthStateEntity(), {
+      id: randomUUID(),
+      stateHash: sha256(token),
+      userId: user.id,
+      provider: 'garmin' as const,
+      codeVerifierEnc: null as string | null,
+      expiresAt: new Date(Date.now() + this.config.oauth.stateTtlSeconds * 1000),
+    });
+    await this.repo.insertState(row);
+    const url = new URL(`${this.config.publicBaseUrl}/connect/garmin`);
+    url.searchParams.set('link', token);
+    return {
+      provider: 'garmin',
+      connectUrl: url.toString(),
+      expiresAt: row.expiresAt.toISOString(),
+      instructions:
+        'Open connectUrl in a browser and paste your own Garmin Connect Personal API key (create it in Garmin Connect on the web, under Account > Personal API Key; it is shown only once). The key goes straight to this server over HTTPS, is stored encrypted and is never shown again. The link works once and expires at expiresAt. Never paste the key into this chat.',
+    };
+  }
+
+  /** What the key page shows before submission: whose account the link is for. Null when invalid or expired */
+  async previewGarminLink(link: string | undefined): Promise<{ label: string; issuer: string; subject: string } | null> {
+    if (!link || link.length > 200) return null;
+    const state = await this.repo.findState(sha256(link));
+    if (!state || state.provider !== 'garmin' || state.expiresAt.getTime() < Date.now()) return null;
+    const user = await this.users.findById(state.userId);
+    return user ? { label: user.displayName ?? user.email ?? user.subject, issuer: user.issuer, subject: user.subject } : null;
+  }
+
+  /**
+   * Consumes the link, validates the key against Garmin (token exchange plus
+   * one list call) and stores it encrypted for the link's user. The key is
+   * never logged, echoed or returned.
+   */
+  async completeGarminKey(
+    link: string | undefined,
+    apiKey: string | undefined,
+    browser: { issuer: string; subject: string } | null,
+  ): Promise<{ connection: ProviderConnectionEntity; userId: string }> {
+    if (!link || link.length > 200) throw new ConnectCallbackError('This link is missing. Ask your AI assistant for a new one with connect_garmin.');
+    // The signed-in browser must be the Fit user the link was issued to; checked before the link is spent
+    const owner = await this.previewGarminLink(link);
+    if (!browser || !owner || owner.issuer !== browser.issuer || owner.subject !== browser.subject)
+      throw new ConnectCallbackError('Sign in as the Fit user this link was created for, then try again. This link was not used.');
+    const state = await this.repo.consumeState(sha256(link));
+    if (!state || state.provider !== 'garmin')
+      throw new ConnectCallbackError('This link is invalid or was already used. Ask your AI assistant for a new one with connect_garmin.');
+    if (state.expiresAt.getTime() < Date.now())
+      throw new ConnectCallbackError('This link has expired. Ask your AI assistant for a new one with connect_garmin.');
+    const key = apiKey?.trim();
+    if (!key || key.length > 4096 || /\s/.test(key))
+      throw new ConnectCallbackError('That does not look like a Garmin Personal API key. Ask for a new link with connect_garmin and try again.');
+
+    const garmin = this.registry.garmin;
+    let grant: TokenGrant;
+    try {
+      grant = await garmin.obtainToken(key);
+      await garmin.listPage(grant.accessToken, { start: 0, limit: 1 });
+    } catch (error) {
+      if (error instanceof ProviderAuthError) {
+        throw new ConnectCallbackError(
+          'Garmin rejected that key (wrong, deleted or expired). Create a new key in Garmin Connect and ask for a new link with connect_garmin.',
+        );
+      }
+      throw error;
+    }
+
+    // A personal key belongs to one person: the same key cannot be attached to two Fit users.
+    // Only a one-way digest identifies it (a hash of a high-entropy secret; the key itself is encrypted).
+    const keyId = `key-${sha256(key).slice(0, 32)}`;
+    const connection = await this.uow
+      .run(async (manager) => {
+        const owner = await this.repo.findByExternal('garmin', keyId, manager);
+        if (owner && owner.userId !== state.userId) {
+          if (owner.status === 'active' || owner.status === 'needs_reauth')
+            throw new ConflictError('This Garmin key is already connected to another Fit user. Personal API keys cannot be shared.');
+          await this.repo.delete(owner.id, manager);
+        }
+        const existing = await this.repo.findForUser(state.userId, 'garmin', manager);
+        const now = new Date();
+        const row =
+          existing ??
+          Object.assign(new ProviderConnectionEntity(), {
+            id: randomUUID(),
+            userId: state.userId,
+            provider: 'garmin' as const,
+            syncCursor: null,
+            lastSyncAt: null,
+            historyOffset: 0,
+            historyComplete: false,
+            failureCount: 0,
+          });
+        Object.assign(row, {
+          externalUserId: keyId,
+          displayName: row.displayName ?? null,
+          scopes: ['personal_api'],
+          status: 'active' as const,
+          connectedAt: now,
+          lastError: null,
+          lastErrorAt: null,
+          nextSyncAt: null,
+          backoffUntil: null,
+          failureCount: 0,
+          apiKeyEnc: this.vault.encrypt(key, row.id),
+          refreshTokenEnc: null,
+          // Replacing the credential voids any in-flight sync: its lease token no longer matches, so a delayed
+          // failure from the old worker cannot discard the newly saved token/key
+          syncLockToken: null,
+          syncLockUntil: null,
+        });
+        this.applyGrant(row, grant);
+        return this.repo.save(row, manager);
+      })
+      .catch((error) => {
+        if (error instanceof ConflictError) throw new ConnectCallbackError(error.message);
+        throw error;
+      });
+    this.logger.log(`Garmin personal API key stored for user ${state.userId}`);
+    return { connection, userId: state.userId };
+  }
+
   async disconnect(user: CurrentUser, input: unknown): Promise<{ provider: Provider; status: 'disconnected'; deletedActivities: number }> {
     const { provider, deleteActivities } = parseInput(disconnectSchema, input);
     const connection = await this.repo.findForUser(user.id, provider);
@@ -220,12 +369,24 @@ export class ConnectionsService {
     return this.uow.run(async (manager) => {
       const locked = await this.repo.lockById(connection.id, manager);
       if (!locked) throw new NotFoundError(`${capitalize(provider)} is not connected`);
-      Object.assign(locked, { status: 'disconnected', accessTokenEnc: null, refreshTokenEnc: null, accessTokenExpiresAt: null, refreshTokenExpiresAt: null });
+      Object.assign(locked, {
+        status: 'disconnected',
+        accessTokenEnc: null,
+        refreshTokenEnc: null,
+        apiKeyEnc: null,
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
+        syncLockToken: null,
+        syncLockUntil: null,
+      });
       await this.repo.save(locked, manager);
       let deletedActivities = 0;
       if (deleteActivities) {
         const result = await manager.query(`DELETE FROM activities WHERE user_id = $1 AND provider = $2`, [user.id, provider]);
         deletedActivities = Array.isArray(result) && typeof result[1] === 'number' ? result[1] : 0;
+        // Imported again from scratch if the user reconnects
+        Object.assign(locked, { historyOffset: 0, historyComplete: false, syncCursor: null });
+        await this.repo.save(locked, manager);
       }
       return { provider, status: 'disconnected' as const, deletedActivities };
     });
@@ -240,6 +401,7 @@ export class ConnectionsService {
         status: 'revoked',
         accessTokenEnc: null,
         refreshTokenEnc: null,
+        apiKeyEnc: null,
         accessTokenExpiresAt: null,
         refreshTokenExpiresAt: null,
         lastError: reason,
@@ -265,8 +427,9 @@ export class ConnectionsService {
    * about to expire. The refresh runs with the connection row locked, so two
    * concurrent callers never both spend a rotating refresh token.
    */
-  async accessToken(connectionId: string): Promise<string> {
+  async accessToken(connectionId: string, lease?: string): Promise<string> {
     const current = await this.repo.findById(connectionId);
+    if (lease && current && current.syncLockToken !== lease) throw new SyncLeaseLostError();
     if (!current || current.status !== 'active') throw new ReauthorizationRequiredError('The provider connection is not active; connect again');
     const cached = this.validToken(current);
     if (cached) return cached;
@@ -274,10 +437,32 @@ export class ConnectionsService {
     // The status change to needs_reauth must commit, so the transaction returns it instead of throwing
     const result = await this.uow.run(async (manager): Promise<{ token: string } | { reauth: string }> => {
       const connection = await this.repo.lockById(connectionId, manager);
+      if (lease && connection && connection.syncLockToken !== lease) throw new SyncLeaseLostError();
       if (!connection || connection.status !== 'active') return { reauth: 'The provider connection is not active; connect again' };
       const name = capitalize(connection.provider);
       const fresh = this.validToken(connection);
       if (fresh) return { token: fresh };
+      if (this.registry.get(connection.provider).authKind === 'api_key') {
+        const apiKey = this.vault.tryDecrypt(connection.apiKeyEnc, connection.id);
+        if (!apiKey) {
+          await this.needsReauth(connection, 'Stored Garmin key could not be read (encryption key changed?); run connect_garmin again', manager);
+          return { reauth: `${name} needs to be connected again` };
+        }
+        try {
+          const grant = await this.registry.garmin.obtainToken(apiKey);
+          this.applyGrant(connection, grant);
+          await this.repo.save(connection, manager);
+          return { token: grant.accessToken };
+        } catch (error) {
+          if (!(error instanceof ProviderAuthError)) throw error;
+          await this.needsReauth(
+            connection,
+            'Garmin rejected the personal API key (deleted or expired); create a new key and run connect_garmin again',
+            manager,
+          );
+          return { reauth: `${name} needs to be connected again` };
+        }
+      }
       const refreshToken = this.vault.tryDecrypt(connection.refreshTokenEnc, connection.id);
       if (!refreshToken) {
         await this.needsReauth(connection, 'Stored credentials could not be read (encryption key changed?); connect again', manager);
@@ -297,6 +482,22 @@ export class ConnectionsService {
     });
     if ('reauth' in result) throw new ReauthorizationRequiredError(result.reauth);
     return result.token;
+  }
+
+  /** The provider no longer accepts the user's credential: stop using it until the user connects again */
+  async markNeedsReauth(connectionId: string, reason: string, lease?: string): Promise<void> {
+    await this.uow.run(async (manager) => {
+      const connection = await this.repo.lockById(connectionId, manager);
+      if (lease && connection && connection.syncLockToken !== lease) throw new SyncLeaseLostError();
+      if (connection && connection.status === 'active') await this.needsReauth(connection, reason, manager);
+    });
+  }
+
+  /** The provider refused the cached access token: drop it so the next accessToken() obtains a fresh one */
+  async discardAccessToken(connectionId: string, lease?: string): Promise<void> {
+    const where = lease ? { id: connectionId, syncLockToken: lease } : { id: connectionId };
+    const result = await this.uow.manager.update(ProviderConnectionEntity, where, { accessTokenEnc: null, accessTokenExpiresAt: null });
+    if (lease && !result.affected) throw new SyncLeaseLostError();
   }
 
   /** The user's connection for a provider, if it is usable for a sync */
@@ -331,6 +532,7 @@ export class ConnectionsService {
       status: 'needs_reauth',
       accessTokenEnc: null,
       refreshTokenEnc: null,
+      apiKeyEnc: null,
       accessTokenExpiresAt: null,
       refreshTokenExpiresAt: null,
       lastError: reason,
@@ -340,19 +542,31 @@ export class ConnectionsService {
   }
 }
 
-function toView(provider: Provider, available: boolean, syncMode: 'pull' | 'push', c: ProviderConnectionEntity | null, activityCount: number): ConnectionView {
+function toView(
+  provider: Provider,
+  available: boolean,
+  syncMode: 'pull',
+  authMethod: 'oauth' | 'api_key',
+  c: ProviderConnectionEntity | null,
+  activityCount: number,
+): ConnectionView {
   return {
     provider,
     available,
     syncMode,
+    authMethod,
     connected: c?.status === 'active',
     status: c?.status ?? 'not_connected',
-    externalUserId: c?.externalUserId ?? null,
+    // For Garmin this is only a key digest (used to stop sharing a key between users): not shown
+    externalUserId: authMethod === 'api_key' ? null : (c?.externalUserId ?? null),
     displayName: c?.displayName ?? null,
     scopes: c?.scopes ?? [],
     connectedAt: c?.connectedAt?.toISOString() ?? null,
     lastSyncAt: c?.lastSyncAt?.toISOString() ?? null,
     syncCursor: c?.syncCursor?.toISOString() ?? null,
+    history: c && authMethod === 'api_key' ? { complete: c.historyComplete, activitiesWalked: c.historyOffset } : null,
+    nextSyncAt: c?.nextSyncAt?.toISOString() ?? null,
+    backoffUntil: c?.backoffUntil?.toISOString() ?? null,
     lastError: c?.lastError ?? null,
     lastErrorAt: c?.lastErrorAt?.toISOString() ?? null,
     activityCount,

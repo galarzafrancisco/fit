@@ -1,7 +1,7 @@
 import { createResourceServer, remoteJwks, resourceAudience, type JwksSource, type ProtectedResource, type ResourceServer } from '@taico/auth';
 import type { AppConfig } from '../config/env.config';
 
-export const RESOURCE_SERVER_FACTORY = Symbol('RESOURCE_SERVER_FACTORY');
+export const RESOURCE_SERVER = Symbol('RESOURCE_SERVER');
 
 /**
  * Fit's two protected resources. A token minted for one is refused on the

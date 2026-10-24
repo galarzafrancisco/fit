@@ -10,7 +10,7 @@ Agent and contributor rules live in [AGENTS.md](../AGENTS.md) (`CLAUDE.md` impor
 | [api.md](api.md) | REST endpoints (same services as MCP) |
 | [webhooks.md](webhooks.md) | Webhook endpoints, durable inbox, retries, dead letters, observability |
 | [providers/strava.md](providers/strava.md) | Strava setup (app, callback domain, push subscription) and limits |
-| [providers/garmin.md](providers/garmin.md) | Garmin Connect Developer Program: restriction, what is implemented, next steps |
+| [providers/garmin.md](providers/garmin.md) | Garmin Connect Personal API: per-user key, capabilities, limits, rotation |
 | [ci.md](ci.md) | CI jobs and what each checks |
 | [deployment.md](deployment.md) | Image, runtime requirements, secrets, URLs to register, what is not automated yet |
 | [design/guidelines.md](design/guidelines.md) | Output conventions for MCP/REST and design rules for a future UI |

@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 /**
  * In-memory stand-ins for Strava and Garmin, served through the `fetch`
  * the app is given (AppModuleOptions.providerFetch). They implement only
@@ -9,9 +7,7 @@ import { createHash } from 'node:crypto';
 
 export const STRAVA_OAUTH = 'https://strava.test/oauth';
 export const STRAVA_API = 'https://strava.test/api/v3';
-export const GARMIN_AUTHORIZE = 'https://garmin.test/oauth2Confirm';
-export const GARMIN_TOKEN = 'https://garmin.test/oauth/token';
-export const GARMIN_API = 'https://apis.garmin.test';
+export const GARMIN_API = 'https://personal.garmin.test';
 
 type Json = Record<string, any>;
 type Call = { method: string; url: URL; body: URLSearchParams | null; headers: Headers };
@@ -173,97 +169,81 @@ export class FakeStrava {
   }
 }
 
+/** A stand-in for the Garmin Connect Personal API: key-to-token exchange and the offset-paged activity list */
 export class FakeGarmin {
   readonly calls: Call[] = [];
-  readonly backfills: Array<{ userId: string; start: number; end: number }> = [];
-  readonly deregistered: string[] = [];
-  /** Activity summaries a Ping callback URL returns */
-  readonly pingData = new Map<string, Json[]>();
-  permissions = ['ACTIVITY_EXPORT', 'HEALTH_EXPORT'];
-  private readonly codes = new Map<string, { userId: string; challenge: string }>();
-  private readonly access = new Map<string, string>();
-  private readonly refresh = new Map<string, string>();
+  /** Valid API keys → the Garmin account they belong to */
+  readonly keys = new Map<string, string>();
+  readonly activities = new Map<string, Json[]>();
+  private readonly tokens = new Map<string, string>();
+  tokenRequests = 0;
+  /** Runs (once) inside the next activity list call before it answers, to simulate a slow response */
+  duringNextList: (() => Promise<void>) | null = null;
+  /** Responses returned (once each, in order) for the next activity list calls instead of data */
+  readonly failNext: Array<{ status: number; headers?: Record<string, string> }> = [];
 
-  constructor(
-    readonly clientId = 'garmin-client',
-    readonly clientSecret = 'garmin-secret',
-  ) {}
+  addKey(apiKey: string, account: string): void {
+    this.keys.set(apiKey, account);
+    if (!this.activities.has(account)) this.activities.set(account, []);
+  }
 
-  /** Simulates the user approving on Garmin's page for the given authorization URL */
-  approve(authorizationUrl: string, userId: string): string {
-    const url = new URL(authorizationUrl);
-    const code = nextToken('garmin-code');
-    this.codes.set(code, { userId, challenge: url.searchParams.get('code_challenge') ?? '' });
-    return code;
+  addActivities(account: string, items: Json[]): void {
+    this.activities.get(account)!.push(...items);
+  }
+
+  /** Simulates the 24 h access tokens expiring */
+  expireTokens(): void {
+    this.tokens.clear();
+  }
+
+  listCalls(): Call[] {
+    return this.calls.filter((c) => c.url.pathname === '/activitylist-service/activities/search/activities');
   }
 
   readonly fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const call = await readCall(input, init);
     this.calls.push(call);
-    if (call.url.href.startsWith(GARMIN_TOKEN)) return this.token(call);
-    if (!call.url.href.startsWith(GARMIN_API)) return json(404, {});
-    const userId = this.access.get(call.headers.get('authorization')?.replace(/^Bearer /, '') ?? '');
-    if (!userId) return json(401, { errorMessage: 'Unauthorized' });
-    const path = call.url.pathname;
-    if (path === '/wellness-api/rest/user/id') return json(200, { userId });
-    if (path === '/wellness-api/rest/user/permissions') return json(200, this.permissions);
-    if (path === '/wellness-api/rest/user/registration' && call.method === 'DELETE') {
-      this.deregistered.push(userId);
-      return new Response(null, { status: 204 });
+    const auth = call.headers.get('authorization') ?? '';
+    if (call.url.pathname === '/personalapitoken-service/personal-api/personal-api-key/token') {
+      this.tokenRequests++;
+      const account = this.keys.get(auth.replace(/^ApiKey /, ''));
+      if (call.method !== 'POST' || !auth.startsWith('ApiKey ') || !account) return json(401, { message: 'Unauthorized' });
+      const jwt = ['e30', Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 86400 })).toString('base64url'), nextToken('sig')].join('.');
+      this.tokens.set(jwt, account);
+      return new Response(jwt, { status: 200, headers: { 'content-type': 'text/plain' } });
     }
-    if (path === '/wellness-api/rest/backfill/activities') {
-      this.backfills.push({
-        userId,
-        start: Number(call.url.searchParams.get('summaryStartTimeInSeconds')),
-        end: Number(call.url.searchParams.get('summaryEndTimeInSeconds')),
-      });
-      return new Response(null, { status: 202 });
-    }
-    if (path === '/wellness-api/rest/activities') return json(200, this.pingData.get(call.url.search) ?? []);
-    return json(404, {});
+    const account = this.tokens.get(auth.replace(/^Bearer /, ''));
+    if (!account) return json(401, { message: 'Unauthorized' });
+    if (call.url.pathname !== '/activitylist-service/activities/search/activities') return json(404, {});
+    const hook = this.duringNextList;
+    this.duringNextList = null;
+    if (hook) await hook();
+    const failure = this.failNext.shift();
+    if (failure) return json(failure.status, { message: 'forced' }, failure.headers);
+    const start = Number(call.url.searchParams.get('start') ?? 0);
+    const limit = Number(call.url.searchParams.get('limit') ?? 20);
+    const startDate = call.url.searchParams.get('startDate');
+    let items = [...(this.activities.get(account) ?? [])].sort((a, b) => String(b.startTimeGMT).localeCompare(String(a.startTimeGMT)));
+    if (startDate) items = items.filter((a) => String(a.startTimeLocal).slice(0, 10) >= startDate);
+    return json(200, items.slice(start, start + limit));
   };
-
-  private token(call: Call): Response {
-    const body = call.body!;
-    if (body.get('client_id') !== this.clientId || body.get('client_secret') !== this.clientSecret) return json(401, { error: 'invalid_client' });
-    let userId: string | undefined;
-    if (body.get('grant_type') === 'authorization_code') {
-      const pending = this.codes.get(body.get('code') ?? '');
-      this.codes.delete(body.get('code') ?? '');
-      const verifier = body.get('code_verifier') ?? '';
-      if (pending && createHash('sha256').update(verifier).digest('base64url') === pending.challenge) userId = pending.userId;
-    } else if (body.get('grant_type') === 'refresh_token') {
-      userId = this.refresh.get(body.get('refresh_token') ?? '');
-    }
-    if (!userId) return json(400, { error: 'invalid_grant' });
-    const accessToken = nextToken('garmin-access');
-    const refreshToken = nextToken('garmin-refresh');
-    this.access.set(accessToken, userId);
-    this.refresh.set(refreshToken, userId);
-    return json(200, {
-      access_token: accessToken,
-      refresh_token: refreshToken,
-      expires_in: 86400,
-      refresh_token_expires_in: 7776000,
-      token_type: 'bearer',
-      scope: 'PARTNER_READ',
-    });
-  }
 }
 
-export function garminActivity(overrides: Json = {}): Json {
+/** A Personal API activity list item. `n` orders activities: a higher n is more recent (one per hour) */
+export function garminActivity(n: number, overrides: Json = {}): Json {
+  const gmt = new Date(Date.UTC(2026, 0, 1) + n * 3_600_000);
+  const local = new Date(gmt.getTime() + 39_600_000);
+  const fmt = (d: Date) => d.toISOString().slice(0, 19).replace('T', ' ');
   return {
-    userId: 'garmin-user-1',
-    summaryId: String(Math.floor(Math.random() * 1e10)),
-    activityId: Math.floor(Math.random() * 1e10),
-    activityName: 'Lunch Ride',
-    activityType: 'ROAD_BIKING',
-    startTimeInSeconds: 1761000000,
-    startTimeOffsetInSeconds: 39600,
-    durationInSeconds: 5400,
-    distanceInMeters: 42000,
-    averageSpeedInMetersPerSecond: 7.8,
-    activeKilocalories: 900,
+    activityId: 9_000_000_000 + n,
+    activityName: `Activity ${n}`,
+    startTimeGMT: fmt(gmt),
+    startTimeLocal: fmt(local),
+    activityType: { typeKey: 'running' },
+    distance: 5000 + n,
+    duration: 1800,
+    elapsedDuration: 1850,
+    calories: 400,
     ...overrides,
   };
 }
@@ -273,7 +253,59 @@ export function providerFetch(strava: FakeStrava, garmin: FakeGarmin): typeof fe
   return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = input instanceof Request ? input.url : String(input);
     if (url.startsWith('https://strava.test')) return strava.fetch(input, init);
-    if (url.startsWith('https://garmin.test') || url.startsWith(GARMIN_API)) return garmin.fetch(input, init);
+    if (url.startsWith(GARMIN_API)) return garmin.fetch(input, init);
     throw new TypeError(`fetch failed: unexpected outbound request to ${url}`);
   }) as typeof fetch;
+}
+
+/**
+ * Stands in for Taico's authorization server as the Garmin key page's browser
+ * sign-in sees it: discovery, dynamic client registration and the token
+ * endpoint. `approve(subject)` is the user finishing the login in the browser.
+ */
+export class FakeTaico {
+  readonly registrations: Array<Record<string, unknown>> = [];
+  readonly tokenRequests: URLSearchParams[] = [];
+  private readonly codes = new Map<string, { subject: string; clientId?: string }>();
+  private counter = 0;
+
+  constructor(
+    private readonly issuer: string,
+    private readonly mint: (subject: string) => Promise<string>,
+  ) {}
+
+  /** The user signs in at Taico as `subject`; returns the authorization code Taico sends back */
+  approve(subject: string, clientId?: string): string {
+    const code = `taico-code-${++this.counter}`;
+    this.codes.set(code, { subject, clientId });
+    return code;
+  }
+
+  async fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    if (url.pathname === '/.well-known/oauth-authorization-server') {
+      return json({
+        issuer: this.issuer,
+        authorization_endpoint: `${this.issuer}/authorize`,
+        token_endpoint: `${this.issuer}/token`,
+        registration_endpoint: `${this.issuer}/register`,
+      });
+    }
+    if (url.pathname === '/register') {
+      this.registrations.push(JSON.parse(String(init?.body)));
+      return json({ client_id: `fit-browser-client-${this.registrations.length}` }, 201);
+    }
+    if (url.pathname === '/token') {
+      const form = new URLSearchParams(String(init?.body));
+      this.tokenRequests.push(form);
+      const grant = this.codes.get(form.get('code') ?? '');
+      // An authorization code is bound to the client it was issued to
+      if (!grant || !form.get('code_verifier') || (grant.clientId && grant.clientId !== form.get('client_id'))) return json({ error: 'invalid_grant' }, 400);
+      const subject = grant.subject;
+      this.codes.delete(form.get('code')!); // codes are single-use
+      return json({ access_token: await this.mint(subject), token_type: 'Bearer', expires_in: 600 });
+    }
+    return json({ error: 'not_found' }, 404);
+  }
 }

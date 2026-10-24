@@ -18,7 +18,7 @@ Browser ───────►│  ConnectCallbackController (OAuth return)   
                 │        ▼                ▼                                        │
                 │  ProviderRegistry ─► StravaAdapter | GarminAdapter ─► provider APIs
                 │                         ▲                                        │
-Strava/Garmin ─►│ WebhooksController ─► WebhookInbox (store, 200) ─► WebhookWorker │
+Strava ─────────►│ WebhooksController ─► WebhookInbox (store, 200) ─► WebhookWorker │
                 │                                             └─► WebhookHandlers  │
                 │  ActivityIngestService: the single activity write path           │
                 └───────────────────────────────┬──────────────────────────────────┘
@@ -59,7 +59,7 @@ All tables are created by `database/migrations/1761200000000-InitialSchema.ts`.
 Decisions:
 
 - **Identity and idempotency.** An activity is identified by the provider's own
-  ID (Strava activity ID, Garmin `summaryId`). Re-imports hit the unique key
+  ID (Strava activity ID, Garmin `activityId`). Re-imports hit the unique key
   and become `updated` or `unchanged` (same payload hash). Concurrent imports
   serialize on the key and a row lock (`concurrency.e2e.spec.ts`).
 - **No destructive loss.** `activities.raw` holds the latest payload; every
@@ -80,17 +80,26 @@ Decisions:
 ## Flows
 
 **Connect.** `connect_provider` creates a random `state` (stored hashed,
-single-use, 15-minute TTL) and, for Garmin, a PKCE verifier (stored
-encrypted), and returns the provider's authorization URL. The provider
+single-use, 15-minute TTL) and returns Strava's authorization URL. The provider
 redirects to `/connect/:provider/callback`, which consumes the state, exchanges
 the code, checks the granted scopes, stores the encrypted tokens and starts
 the initial sync in the background. The callback answers a small HTML page;
 there is no web app in v1.
 
 **Sync.** Strava (pull): page through `/athlete/activities` for
-`[cursor − overlap, now)` (first time: the last `SYNC_INITIAL_DAYS`). Garmin
-(push): request a backfill and let the data arrive by webhook. Every run is a
+`[cursor − overlap, now)` (first time: the last `SYNC_INITIAL_DAYS`). Every run is a
 `sync_runs` row. The cursor moves only on a complete run.
+
+**Garmin (Personal API, no OAuth, no push).** `connect_garmin` creates a
+single-use link (stored hashed in `oauth_states`, bound to the authenticated
+Fit user's id) and returns `/connect/garmin?link=…`. The page shows which Fit
+account it belongs to; submitting the user's own API key consumes the link,
+validates the key with Garmin (token exchange + one list call), and stores it
+encrypted (`provider_connections.api_key_enc`, AES-256-GCM bound to the row).
+`GarminSyncService` then walks `activitylist-service` newest-first with the
+offset persisted per page (`history_offset`), and a periodic job polls with
+`startDate = cursor − overlap`. Access tokens (24 h) are re-obtained from the
+key; there are no refresh tokens. Details and limits: [providers/garmin.md](providers/garmin.md).
 
 **Tokens.** `ConnectionsService.accessToken` refreshes shortly before expiry
 with the connection row locked, so concurrent callers never both spend a
@@ -128,10 +137,20 @@ Known gaps, deliberately left out of v1:
   Add `@ApiRoute` metadata and a `@fit/client` package before building a UI.
 - **No cross-provider de-duplication** of the same workout.
 - **No streams/laps/routes**; only summaries.
-- **Garmin is implemented to spec but not verified against the live API**,
-  because it needs an approved developer-program app ([providers/garmin.md](providers/garmin.md)).
-- **No scheduled background re-sync**; webhooks keep data current and
-  `sync_provider` catches up on demand.
+- **Garmin is verified only against a fake** that follows the official
+  Personal API client; response field names for activity lists come from that
+  client's usage and Garmin Connect's list format, not from a published schema
+  ([providers/garmin.md](providers/garmin.md)).
+- **The Garmin key page signs in through Taico as an OAuth client.** Dynamic
+  client registration happens lazily at first use (in memory, per pod); if Taico
+  does not offer registration or the sign-in fails, the page answers 502/400 and
+  no key can be entered. Login/session state is in short-lived encrypted cookies
+  scoped to `/connect/garmin`, not in the database.
+- **Garmin sync lease**: `provider_connections.sync_lock_until` is taken with one
+  atomic `UPDATE ... WHERE lease free`, renewed before each Garmin call and
+  released afterwards (a dead holder lapses after 15 minutes). Concurrency is
+  bounded per pod (`GARMIN_CONCURRENCY`); across pods the bound is one run per connection.
+- **Scheduled re-sync exists only for Garmin** (Strava is webhook-driven).
 - **No Kubernetes manifests or image publishing yet** ([deployment.md](deployment.md)).
 - **Webhook worker is in-process**; claims use `SKIP LOCKED`, so several
   replicas are safe, but there is no separate worker deployment.
