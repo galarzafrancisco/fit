@@ -9,9 +9,11 @@ export class GarminSyncLock1761400000000 implements MigrationInterface {
 
   async up(q: QueryRunner): Promise<void> {
     await q.query(`ALTER TABLE provider_connections ADD COLUMN sync_lock_until timestamptz`);
+    await q.query(`ALTER TABLE provider_connections ADD COLUMN sync_lock_token varchar(64)`);
   }
 
   async down(q: QueryRunner): Promise<void> {
+    await q.query(`ALTER TABLE provider_connections DROP COLUMN sync_lock_token`);
     await q.query(`ALTER TABLE provider_connections DROP COLUMN sync_lock_until`);
   }
 }

@@ -22,6 +22,8 @@ const MAX_POLL_PAGES = 1000;
 
 /** Raised inside a run when the user's key no longer works; the connection is already marked needs_reauth */
 class KeyRejected extends Error {}
+/** The sync lease lapsed and another worker took it: stop without touching shared state */
+class LeaseLost extends Error {}
 
 const sleep = (ms: number) => (ms > 0 ? new Promise<void>((resolve) => setTimeout(resolve, ms)) : Promise.resolve());
 
@@ -144,18 +146,19 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
 
   private async runConnection(connection: ProviderConnectionEntity, trigger: SyncTrigger): Promise<SyncRunView & { note?: string }> {
     // Atomic lease: of any number of concurrent refreshes, ticks or pods, exactly one gets to call Garmin
-    if (!(await this.repo.claimSync(connection.id, new Date(), new Date(Date.now() + RUNNING_TIMEOUT_MS)))) {
+    const lease = await this.repo.claimSync(connection.id, new Date(), new Date(Date.now() + RUNNING_TIMEOUT_MS));
+    if (!lease) {
       const current = await this.uow.manager.findOne(SyncRunEntity, { where: { connectionId: connection.id }, order: { startedAt: 'DESC' } });
       return { ...(current ? toSyncRunView(current) : emptyView(connection)), note: 'A Garmin sync is already running.' };
     }
     try {
-      return await this.runClaimed(connection, trigger);
+      return await this.runClaimed(connection, trigger, lease);
     } finally {
-      await this.repo.releaseSync(connection.id).catch((error) => this.logger.warn(`Could not release Garmin sync lease: ${(error as Error).message}`));
+      await this.repo.releaseSync(connection.id, lease).catch((error) => this.logger.warn(`Could not release Garmin sync lease: ${(error as Error).message}`));
     }
   }
 
-  private async runClaimed(connection: ProviderConnectionEntity, trigger: SyncTrigger): Promise<SyncRunView & { note?: string }> {
+  private async runClaimed(connection: ProviderConnectionEntity, trigger: SyncTrigger, lease: string): Promise<SyncRunView & { note?: string }> {
     const fresh = (await this.repo.findById(connection.id)) ?? connection;
 
     const startedAt = new Date();
@@ -186,7 +189,7 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
     let note: string | undefined;
     const state = { cursor: null as Date | null, nextDelayMs: this.config.pollIntervalMs, failed: false, retryAfterMs: 0 };
     const holder = { token: '' };
-    const last = { at: 0 };
+    const last = { at: 0, lease };
     try {
       const adapter = this.registry.garmin;
       const call = <T>(work: (token: string) => Promise<T>): Promise<T> => this.request(fresh.id, holder, last, work);
@@ -250,6 +253,15 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
         run.status = 'succeeded';
       }
     } catch (error) {
+      if (error instanceof LeaseLost) {
+        // Another worker owns the connection now: record this run as aborted, leave scheduling/position state to the owner
+        run.status = 'failed';
+        run.error = error.message;
+        run.finishedAt = new Date();
+        await this.uow.manager.save(SyncRunEntity, run);
+        this.logger.warn(`Garmin sync ${run.id} aborted: lease lost`);
+        return { ...toSyncRunView(run), note: 'This sync lost its lease to another worker and stopped.' };
+      }
       state.failed = !(error instanceof KeyRejected || error instanceof ReauthorizationRequiredError);
       const message =
         error instanceof DomainError ? error.message : error instanceof KeyRejected ? error.message : `Unexpected error: ${(error as Error).message}`;
@@ -329,13 +341,18 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
    * retry with exponential backoff (Retry-After wins, capped); a rejected
    * access token is replaced once from the key; a rejected key stops the run.
    */
-  private async request<T>(connectionId: string, holder: { token: string }, last: { at: number }, work: (token: string) => Promise<T>): Promise<T> {
+  private async request<T>(
+    connectionId: string,
+    holder: { token: string },
+    last: { at: number; lease: string },
+    work: (token: string) => Promise<T>,
+  ): Promise<T> {
     let replacedToken = false;
     for (let attempt = 0; ; attempt++) {
       const wait = last.at + this.config.minRequestIntervalMs - Date.now();
       if (wait > 0) await sleep(wait);
       last.at = Date.now();
-      await this.repo.renewSync(connectionId, new Date(last.at + RUNNING_TIMEOUT_MS));
+      if (!(await this.repo.renewSync(connectionId, last.lease, new Date(last.at + RUNNING_TIMEOUT_MS)))) throw new LeaseLost('Garmin sync lease was lost');
       try {
         return await work(holder.token);
       } catch (error) {

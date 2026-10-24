@@ -349,12 +349,25 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
       const now = new Date();
       const claims = await Promise.all(Array.from({ length: 6 }, () => repo.claimSync(id, now, new Date(now.getTime() + 60_000))));
       expect(claims.filter(Boolean)).toHaveLength(1);
+      const winner = claims.find(Boolean) as string;
       // Held leases are skipped by the scheduler
       await db.query(`UPDATE provider_connections SET next_sync_at = NULL, backoff_until = NULL WHERE id = $1`, [id]);
       expect(await repo.dueGarminConnections(now, 10)).toHaveLength(0);
-      // A holder that died stops blocking once its lease lapses
-      expect(await repo.claimSync(id, new Date(now.getTime() + 120_000), new Date(now.getTime() + 180_000))).toBe(true);
-      await repo.releaseSync(id);
+      // A holder that died (A) stops blocking once its lease lapses: B re-claims
+      const later = new Date(now.getTime() + 120_000);
+      const tokenB = await repo.claimSync(id, later, new Date(later.getTime() + 60_000));
+      expect(tokenB).toEqual(expect.any(String));
+      expect(tokenB).not.toBe(winner);
+      // Stale A can neither renew nor release B's lease
+      expect(await repo.renewSync(id, winner, new Date(later.getTime() + 900_000))).toBe(false);
+      await repo.releaseSync(id, winner);
+      const [row] = await db.query(`SELECT sync_lock_token FROM provider_connections WHERE id = $1`, [id]);
+      expect(row.sync_lock_token).toBe(tokenB);
+      // ...so a third worker still cannot claim while B holds it
+      expect(await repo.claimSync(id, new Date(later.getTime() + 1_000), new Date(later.getTime() + 61_000))).toBeNull();
+      // B can renew and release; then the connection is due again
+      expect(await repo.renewSync(id, tokenB as string, new Date(later.getTime() + 90_000))).toBe(true);
+      await repo.releaseSync(id, tokenB as string);
       expect(await repo.dueGarminConnections(now, 10)).toHaveLength(1);
       await db.query(`UPDATE provider_connections SET next_sync_at = now() + interval '30 minutes' WHERE id = $1`, [id]);
     });

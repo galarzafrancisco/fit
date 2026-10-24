@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { Provider } from '@fit/activity-model';
 import { Injectable } from '@nestjs/common';
 import { EntityManager, LessThan } from 'typeorm';
@@ -88,28 +89,42 @@ export class ConnectionsRepository {
   }
 
   /**
-   * Atomically takes the sync lease on a connection. True for exactly one of any
-   * number of concurrent callers (requests or pods); the lease lapses on its own
-   * at `until` if the holder dies.
+   * Atomically takes the sync lease on a connection and returns its opaque owner
+   * token, or null if someone else holds it. For any number of concurrent callers
+   * (requests or pods) at most one gets a token; the lease lapses on its own at
+   * `until` if the holder dies. Renewal and release must present the token, so a
+   * stale holder can never touch a newer holder's lease.
    */
-  async claimSync(connectionId: string, now: Date, until: Date): Promise<boolean> {
+  async claimSync(connectionId: string, now: Date, until: Date): Promise<string | null> {
+    const token = randomUUID();
     const rows = returnedRows<{ id: string }>(
       await this.uow.manager.query(
-        `UPDATE provider_connections SET sync_lock_until = $2
+        `UPDATE provider_connections SET sync_lock_until = $2, sync_lock_token = $4
          WHERE id = $1 AND status = 'active' AND (sync_lock_until IS NULL OR sync_lock_until <= $3) RETURNING id`,
-        [connectionId, until, now],
+        [connectionId, until, now, token],
       ),
+    );
+    return rows.length > 0 ? token : null;
+  }
+
+  /** Extends a lease held by a long run. False when the lease is no longer ours (it lapsed and was re-claimed) */
+  async renewSync(connectionId: string, token: string, until: Date): Promise<boolean> {
+    const rows = returnedRows<{ id: string }>(
+      await this.uow.manager.query(`UPDATE provider_connections SET sync_lock_until = $3 WHERE id = $1 AND sync_lock_token = $2 RETURNING id`, [
+        connectionId,
+        token,
+        until,
+      ]),
     );
     return rows.length > 0;
   }
 
-  /** Extends a lease held by a long run */
-  async renewSync(connectionId: string, until: Date): Promise<void> {
-    await this.uow.manager.update(ProviderConnectionEntity, { id: connectionId }, { syncLockUntil: until });
-  }
-
-  async releaseSync(connectionId: string): Promise<void> {
-    await this.uow.manager.update(ProviderConnectionEntity, { id: connectionId }, { syncLockUntil: null });
+  /** Releases the lease only if we still own it */
+  async releaseSync(connectionId: string, token: string): Promise<void> {
+    await this.uow.manager.query(`UPDATE provider_connections SET sync_lock_until = NULL, sync_lock_token = NULL WHERE id = $1 AND sync_lock_token = $2`, [
+      connectionId,
+      token,
+    ]);
   }
 
   async purgeExpiredStates(now = new Date()): Promise<void> {

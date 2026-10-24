@@ -78,6 +78,10 @@ export class ProviderConnectionEntity {
   @Column({ name: 'sync_lock_until', type: 'timestamptz', nullable: true })
   syncLockUntil: Date | null;
 
+  /** Opaque owner of the current lease; renew/release must present it (fencing) */
+  @Column({ name: 'sync_lock_token', type: 'varchar', length: 64, nullable: true })
+  syncLockToken: string | null;
+
   @Column({ name: 'failure_count', type: 'int', default: 0 })
   failureCount: number;
 
