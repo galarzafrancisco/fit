@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Provider } from '@fit/activity-model';
 import { Injectable } from '@nestjs/common';
 import { EntityManager, LessThan } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { returnedRows } from '../database/sql';
 import { UnitOfWork } from '../database/unit-of-work';
 import { OAuthStateEntity, ProviderConnectionEntity } from './connection.entities';
@@ -117,6 +118,22 @@ export class ConnectionsRepository {
       ]),
     );
     return rows.length > 0;
+  }
+
+  /**
+   * Updates sync state (cursor, backoff, history position, ...) only while the
+   * lease token is still ours. False when another worker owns the connection now,
+   * in which case nothing was written.
+   */
+  async updateOwned(connectionId: string, token: string, values: QueryDeepPartialEntity<ProviderConnectionEntity>): Promise<boolean> {
+    const result = await this.uow.manager
+      .createQueryBuilder()
+      .update(ProviderConnectionEntity)
+      .set(values)
+      .where('id = :connectionId AND sync_lock_token = :token', { connectionId, token })
+      .returning('id')
+      .execute();
+    return returnedRows<{ id: string }>(result.raw).length > 0;
   }
 
   /** Releases the lease only if we still own it */

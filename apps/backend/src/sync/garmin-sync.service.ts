@@ -240,7 +240,7 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
         offset += items.length;
         const reachedLimit = this.config.historyMaxActivities > 0 && offset >= this.config.historyMaxActivities;
         historyComplete = items.length < limit || reachedLimit;
-        await this.savePosition(fresh.id, { historyOffset: offset, historyComplete });
+        await this.savePosition(fresh.id, lease, { historyOffset: offset, historyComplete });
         if (!state.cursor) state.cursor = startedAt; // the newest activities are covered once the first page is in
         if (reachedLimit && items.length >= limit) note = `History import stopped at GARMIN_HISTORY_MAX_ACTIVITIES (${this.config.historyMaxActivities}).`;
       }
@@ -275,7 +275,13 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
     run.finishedAt = new Date();
     await this.uow.manager.save(SyncRunEntity, run);
 
-    await this.finish(fresh.id, run, state);
+    if (!(await this.finish(fresh.id, lease, run, state))) {
+      this.logger.warn(`Garmin sync ${run.id} lost its lease before finishing; scheduling state left to the new owner`);
+      run.status = 'failed';
+      run.error = 'Garmin sync lease was lost';
+      await this.uow.manager.save(SyncRunEntity, run);
+      return { ...toSyncRunView(run), note: 'This sync lost its lease to another worker and stopped.' };
+    }
     this.logger.log(
       `Garmin sync ${run.id} (${trigger}) ${run.status}: ${run.pages} pages, ${run.fetched} fetched, ${run.created} new, ${run.updated} updated, ${run.unchanged} unchanged`,
     );
@@ -285,11 +291,12 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
   /** Updates scheduling and error state after a run. The cursor advances only when the run covered everything newer than it */
   private async finish(
     connectionId: string,
+    lease: string,
     run: SyncRunEntity,
     state: { cursor: Date | null; nextDelayMs: number; failed: boolean; retryAfterMs: number },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const connection = await this.repo.findById(connectionId);
-    if (!connection) return;
+    if (!connection) return true;
     const now = Date.now();
     if (run.status === 'failed' || state.failed) {
       if (state.failed) {
@@ -313,23 +320,19 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
       if (connection.lastError) connection.lastErrorAt = new Date();
     }
     // Do not overwrite status/key changes made while the run was going (e.g. needs_reauth)
-    await this.uow.manager.update(
-      ProviderConnectionEntity,
-      { id: connectionId },
-      {
-        failureCount: connection.failureCount,
-        backoffUntil: connection.backoffUntil,
-        nextSyncAt: connection.nextSyncAt,
-        syncCursor: connection.syncCursor,
-        lastSyncAt: connection.lastSyncAt,
-        lastError: connection.lastError,
-        lastErrorAt: connection.lastErrorAt,
-      },
-    );
+    return this.repo.updateOwned(connectionId, lease, {
+      failureCount: connection.failureCount,
+      backoffUntil: connection.backoffUntil,
+      nextSyncAt: connection.nextSyncAt,
+      syncCursor: connection.syncCursor,
+      lastSyncAt: connection.lastSyncAt,
+      lastError: connection.lastError,
+      lastErrorAt: connection.lastErrorAt,
+    });
   }
 
-  private savePosition(connectionId: string, position: { historyOffset: number; historyComplete: boolean }): Promise<unknown> {
-    return this.uow.manager.update(ProviderConnectionEntity, { id: connectionId }, position);
+  private async savePosition(connectionId: string, lease: string, position: { historyOffset: number; historyComplete: boolean }): Promise<void> {
+    if (!(await this.repo.updateOwned(connectionId, lease, position))) throw new LeaseLost('Garmin sync lease was lost');
   }
 
   private pollStart(cursor: Date): Date {
@@ -354,8 +357,13 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
       last.at = Date.now();
       if (!(await this.repo.renewSync(connectionId, last.lease, new Date(last.at + RUNNING_TIMEOUT_MS)))) throw new LeaseLost('Garmin sync lease was lost');
       try {
-        return await work(holder.token);
+        const result = await work(holder.token);
+        // The call may have outlived the lease: confirm we still own the connection before the caller persists anything
+        if (!(await this.repo.renewSync(connectionId, last.lease, new Date(Date.now() + RUNNING_TIMEOUT_MS))))
+          throw new LeaseLost('Garmin sync lease was lost');
+        return result;
       } catch (error) {
+        if (error instanceof LeaseLost) throw error;
         if (error instanceof ProviderAuthError) {
           if (replacedToken) {
             await this.connections.markNeedsReauth(

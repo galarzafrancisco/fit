@@ -372,6 +372,41 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
       await db.query(`UPDATE provider_connections SET next_sync_at = now() + interval '30 minutes' WHERE id = $1`, [id]);
     });
 
+    it('a worker whose lease lapsed during a slow Garmin call cannot change state the new owner holds', async () => {
+      const repo = test.app.get(ConnectionsRepository);
+      const [{ id }] = await db.query(`SELECT id FROM provider_connections WHERE provider = 'garmin'`);
+      await db.query(
+        `UPDATE provider_connections SET sync_lock_until = NULL, sync_lock_token = NULL, backoff_until = NULL, next_sync_at = NULL WHERE id = $1`,
+        [id],
+      );
+      const read = async () =>
+        (
+          await db.query(
+            `SELECT sync_cursor, next_sync_at, backoff_until, failure_count, history_offset, history_complete, sync_lock_token FROM provider_connections WHERE id = $1`,
+            [id],
+          )
+        )[0];
+      const before = await read();
+      let tokenB: string | null = null;
+      // While A waits for Garmin its lease lapses and B claims the connection
+      test.garmin.duringNextList = async () => {
+        await db.query(`UPDATE provider_connections SET sync_lock_until = now() - interval '1 second' WHERE id = $1`, [id]);
+        tokenB = await repo.claimSync(id, new Date(), new Date(Date.now() + 600_000));
+      };
+      const result = await callTool(test, tokenA, 'refresh_garmin');
+      expect(tokenB).toEqual(expect.any(String));
+      expect(result.data.status).toBe('failed');
+      expect(result.data.error).toMatch(/lease/);
+      // A wrote none of the shared state, and B is still the sole owner
+      const after = await read();
+      expect(after).toEqual({ ...before, sync_lock_token: tokenB });
+      expect(await repo.claimSync(id, new Date(), new Date(Date.now() + 600_000))).toBeNull();
+      expect(await repo.updateOwned(id, 'stale-token', { historyOffset: 999 })).toBe(false);
+      expect((await read()).history_offset).toBe(before.history_offset);
+      await repo.releaseSync(id, tokenB as unknown as string);
+      await db.query(`UPDATE provider_connections SET next_sync_at = now() + interval '30 minutes' WHERE id = $1`, [id]);
+    });
+
     it('requires a connected Garmin account', async () => {
       const result = await callTool(test, tokenB, 'refresh_garmin');
       expect(result.isError).toBe(true);

@@ -177,6 +177,8 @@ export class FakeGarmin {
   readonly activities = new Map<string, Json[]>();
   private readonly tokens = new Map<string, string>();
   tokenRequests = 0;
+  /** Runs (once) inside the next activity list call before it answers, to simulate a slow response */
+  duringNextList: (() => Promise<void>) | null = null;
   /** Responses returned (once each, in order) for the next activity list calls instead of data */
   readonly failNext: Array<{ status: number; headers?: Record<string, string> }> = [];
 
@@ -213,6 +215,9 @@ export class FakeGarmin {
     const account = this.tokens.get(auth.replace(/^Bearer /, ''));
     if (!account) return json(401, { message: 'Unauthorized' });
     if (call.url.pathname !== '/activitylist-service/activities/search/activities') return json(404, {});
+    const hook = this.duringNextList;
+    this.duringNextList = null;
+    if (hook) await hook();
     const failure = this.failNext.shift();
     if (failure) return json(failure.status, { message: 'forced' }, failure.headers);
     const start = Number(call.url.searchParams.get('start') ?? 0);
