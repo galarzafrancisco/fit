@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fit-config
+  namespace: fit
+data:
+  # NODE_ENV=production and PORT=4190 come from the image.
+  PUBLIC_BASE_URL: https://fit.american-broomstick.com
+  # Taico signs access tokens with this issuer; JWKS is {issuer}/.well-known/jwks.json.
+  # Audiences are $PUBLIC_BASE_URL/mcp and $PUBLIC_BASE_URL/api.
+  TAICO_ISSUER: https://taico.app
+  # Authorization server of Taico's registered `fit` MCP server entry,
+  # advertised in protected-resource metadata so MCP clients can sign in.
+  TAICO_AUTHORIZATION_SERVERS: https://taico.app/mcp/fit/0.0.0
+  # Durable PostgreSQL: the dedicated fit-postgres instance on the Spark host,
+  # provisioned by spark-ops (bootstrap/fit-postgres.sh). DATABASE_URL comes
+  # from the fit-database Secret (see deployment.yaml), never from here.
+  # Explicit, so a missing URL fails startup instead of picking another mode.
+  DATABASE_MODE: postgres
+  # Host-local connection without TLS, as provisioned by spark-ops.
+  DATABASE_SSL: 'false'
+  # Strava/Garmin credentials and webhook secrets are NOT set here: they come
+  # from the optional fit-providers Secret (see deployment.yaml). Without them
+  # the providers are reported unavailable and the webhook endpoints answer 404.

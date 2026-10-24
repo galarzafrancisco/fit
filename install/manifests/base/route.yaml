@@ -1,0 +1,24 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: fit
+  namespace: fit
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: ListenerSet
+      name: fit
+      sectionName: https
+  hostnames:
+    - fit.american-broomstick.com
+  # The whole host goes to the backend: /mcp, /api, /health, the OAuth callback
+  # (/connect/<provider>/callback), provider webhooks (/webhooks/<provider>/...)
+  # and /.well-known/oauth-protected-resource.
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: fit
+          port: 80

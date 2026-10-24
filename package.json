@@ -30,7 +30,8 @@
     "nx": "^21.0.0",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3",
-    "typescript-eslint": "^8.72.0"
+    "typescript-eslint": "^8.72.0",
+    "yaml": "^2.9.1"
   },
   "repository": {
     "type": "git",

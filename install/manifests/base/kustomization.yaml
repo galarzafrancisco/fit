@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Deployed by CI: the whole install/manifests tree is copied to
+# spark-ops/k8s/fit, the image below is pinned to main-<sha7> with
+# `kustomize edit set image`, and spark-ops auto-merges. See docs/deployment.md.
+namespace: fit
+
+resources:
+  - ./namespace.yaml
+  - ./configmap.yaml
+  - ./deployment.yaml
+  - ./service.yaml
+  - ./postgres-service.yaml
+  - ./certificate.yaml
+  - ./listener-set.yaml
+  - ./route.yaml
+  - ./https-redirect.yaml
+
+images:
+  - name: ghcr.io/galarzafrancisco/fit
+    newName: ghcr.io/galarzafrancisco/fit
+    newTag: main

@@ -36,10 +36,59 @@ managed in spark-ops, as money does); never in the repo or the image.
 - Rotating a webhook secret: set the new secret, redeploy, then update the
   provider (Strava: delete and recreate the push subscription).
 
-## Not automated yet (technical debt)
+## Deployment on the Spark (spark-ops, same pattern as money)
 
-money's CI also pushes the image to GHCR and opens a spark-ops PR with
-Kustomize manifests (`install/manifests`). Fit does not yet: before the first
-deployment, add manifests (Deployment with the hardening above, Service,
-Route/Certificate, ConfigMap, Secret references, Postgres), a publish job and
-the spark-ops deploy job, following money's `docs/deployment.md`.
+Flow on every push to `main`: CI (tests, security, image smoke test, manifest
+render) → `publish` pushes `ghcr.io/galarzafrancisco/fit:main-<sha7>` (arm64) →
+`deploy` copies `install/manifests` to `spark-ops/k8s/fit`, pins the image and
+opens an auto-merged spark-ops PR → Argo CD syncs `k8s/fit/overlays/main` into
+namespace `fit`. Host: `https://fit.american-broomstick.com` (Gateway
+`public` ListenerSet + cert-manager certificate, HTTP→HTTPS redirect).
+
+Differences from money: port 4190; Postgres host port 15435; no browser
+sessions (so no session key); secret `fit-secrets` holds `TOKEN_ENCRYPTION_KEY`;
+optional secret `fit-providers` holds Strava/Garmin variables; no Up/market config.
+
+### One-time prerequisites (manual, privileged)
+
+1. On the Spark host, from the spark-ops checkout (see spark-ops `docs/fit-postgres.md`):
+   `./bootstrap/fit-secrets.sh && ./bootstrap/fit-postgres.sh`. This creates the
+   host-backed database (`/home/fran/prod/storage/fit/postgres`) and the Secrets
+   `fit/fit-database` (`DATABASE_URL`) and `fit/fit-secrets` (`TOKEN_ENCRYPTION_KEY`).
+   `bootstrap.sh` runs both on cluster recreation. Back up the `fit-secrets.env`
+   and `fit-postgres.env` files off-host.
+2. GitHub repo secret `SPARK_OPS_TOKEN` on `galarzafrancisco/fit` (same PAT as money).
+3. DNS for `fit.american-broomstick.com` (same target as money).
+4. Taico registry entry `fit` → `https://fit.american-broomstick.com/mcp`.
+5. Optional, when provider apps exist: create the Secret `fit-providers` in
+   namespace `fit` from the variables in [configuration.md](configuration.md)
+   (`kubectl -n fit create secret generic fit-providers --from-literal=...`; avoid
+   shell history), then `kubectl -n fit rollout restart deploy/fit`. Register the
+   webhook URLs from the table above.
+
+Merging to `main` before step 1 deploys a pod that cannot start (the previous
+state is unaffected on first deploy; the rolling update keeps an old pod, if any).
+
+### Verify
+
+```bash
+kubectl -n fit rollout status deploy/fit
+kubectl -n fit logs deploy/fit | tail
+curl -fsS https://fit.american-broomstick.com/health
+curl -fsS https://fit.american-broomstick.com/.well-known/oauth-protected-resource/mcp
+```
+
+### Rollback
+
+Revert the spark-ops commit (or its `Deploy fit (main-<sha>)` PR) so Argo CD
+re-syncs the previous image tag; or `kubectl -n fit rollout undo deploy/fit`
+(Argo CD may revert it; revert in Git for durability). Migrations are forward-only:
+roll back only to an image compatible with the current schema. Never rotate
+`TOKEN_ENCRYPTION_KEY` as part of a rollback.
+
+## Not validated yet (risks)
+
+- Nothing has been deployed: validated so far by rendering manifests with
+  kustomize and running the security/database checks in CI.
+- Pod memory request/limit are copied from money; measure after first deploy.
+- Strava/Garmin end-to-end needs the manual provider setup above.
