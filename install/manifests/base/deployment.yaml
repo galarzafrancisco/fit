@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fit
+  namespace: fit
+  labels:
+    app: fit
+spec:
+  # One pod, replaced with a rolling update so a deploy has no downtime: the new
+  # pod starts and must pass its readiness probe before the old one is stopped.
+  # For that short overlap both pods run against the same PostgreSQL database,
+  # and the new one runs any pending migrations on startup. Data lives in
+  # PostgreSQL, so replacing the pod loses nothing.
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: fit
+  template:
+    metadata:
+      labels:
+        app: fit
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fit
+          image: ghcr.io/galarzafrancisco/fit:main
+          ports:
+            - containerPort: 4190
+              name: http
+              protocol: TCP
+          env:
+            # postgresql://fit:<password>@fit-postgres:5432/fit. The
+            # Secret, the fit-postgres Service and its EndpointSlice belong
+            # to spark-ops (bootstrap/fit-postgres.sh); Fit only consumes
+            # them. Never copy the value into Git. Not optional: without it
+            # production refuses to start, it never falls back to memory.
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fit-database
+                  key: DATABASE_URL
+          envFrom:
+            - configMapRef:
+                name: fit-config
+            # TOKEN_ENCRYPTION_KEY (32 random bytes, base64): encrypts provider
+            # tokens at rest. Provisioned by spark-ops (bootstrap/fit-secrets.sh),
+            # never committed. Not optional: production refuses to start without it.
+            - secretRef:
+                name: fit-secrets
+            # Optional, created manually by the operator once the provider apps
+            # exist (docs/deployment.md): STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET,
+            # STRAVA_WEBHOOK_SECRET, STRAVA_WEBHOOK_SUBSCRIPTION_ID, GARMIN_CLIENT_ID,
+            # GARMIN_CLIENT_SECRET, GARMIN_WEBHOOK_SECRET. Absent: providers disabled.
+            - secretRef:
+                name: fit-providers
+                optional: true
+          # Numeric user and group, as in spark-ops' other hardened workloads.
+          # The kubelet enforces runAsNonRoot only against a numeric UID; 1000
+          # is the image's `node` user (Dockerfile USER 1000:1000).
+          # scripts/check-manifest-security.mjs checks this in CI.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ['ALL']
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              memory: '256Mi'
+              cpu: '100m'
+            # The database is outside the pod. Request is a starting point, to be
+            # measured after the first deploy; the limit leaves room for sync runs
+            # and webhook backlogs.
+            limits:
+              memory: '1Gi'
+              cpu: '1000m'
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          # /health runs SELECT 1, so a Postgres outage turns the pod unready
+          # and, after ~2 minutes, restarts it. Lenient so a short database
+          # restart doesn't cause one.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

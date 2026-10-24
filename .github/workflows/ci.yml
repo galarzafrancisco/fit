@@ -22,6 +22,9 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
 jobs:
   merge-freshness:
     name: Merge result is current
@@ -253,12 +256,168 @@ jobs:
         if: always()
         run: docker logs fit-smoke 2>&1 | tail -50 || true
 
+  manifests:
+    # main auto-deploys through spark-ops, so manifests must render before merge
+    name: Render deployment manifests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Install the YAML parser used by the checks
+        run: npm install --no-save --no-audit --no-fund --ignore-scripts "yaml@$(node -p "require('./package.json').devDependencies.yaml")"
+
+      - name: Render as the deploy job and spark-ops will
+        # Same image pin as `deploy`, on a copy, then build the overlay Argo CD syncs
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cp -r install/manifests "$work/fit"
+          printf 'DOMAIN=example.invalid\nSPARK_IP=10.0.0.50\n' > "$work/fit/overlays/main/env.env"
+          (cd "$work/fit/base" && kustomize edit set image "$IMAGE=$IMAGE:main-0000000")
+          kustomize build "$work/fit/overlays/main" > "$work/rendered.yaml"
+          grep -q "image: $IMAGE:main-0000000" "$work/rendered.yaml"
+          cat "$work/rendered.yaml"
+          # Numeric non-root user and the rest of the hardening
+          node scripts/check-manifest-security.mjs "$work/rendered.yaml"
+          # Durable Postgres, DATABASE_URL only from the spark-ops Secret
+          node scripts/check-manifest-database.mjs "$work/rendered.yaml"
+
+  publish:
+    # Only job holding packages: write. It never runs on pull_request events,
+    # so PR code cannot obtain a GHCR-writable token.
+    name: Push container image
+    runs-on: ubuntu-24.04-arm
+    needs: [test, security, image, manifests]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          cleanup: false
+
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_SUMMARY: 'false'
+          DOCKER_BUILD_RECORD_UPLOAD: 'false'
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  deploy:
+    name: Copy manifests to spark-ops
+    runs-on: ubuntu-24.04-arm
+    needs: [publish]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout fit
+        uses: actions/checkout@v5
+        with:
+          path: fit
+
+      - name: Checkout spark-ops
+        uses: actions/checkout@v5
+        with:
+          repository: galarzafrancisco/spark-ops
+          token: ${{ secrets.SPARK_OPS_TOKEN }}
+          path: spark-ops
+
+      - name: Setup Kustomize
+        uses: imranismail/setup-kustomize@v2
+
+      - name: Extract image tag
+        id: image-tag
+        run: |
+          SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "tag=main-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Copy manifests to spark-ops
+        run: |
+          set -euo pipefail
+          rm -rf spark-ops/k8s/fit
+          mkdir -p spark-ops/k8s
+          cp -r fit/install/manifests spark-ops/k8s/fit
+          cd spark-ops/k8s/fit/base
+          kustomize edit set image "$IMAGE=$IMAGE:${{ steps.image-tag.outputs.tag }}"
+
+      - name: Create spark-ops pull request
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.SPARK_OPS_TOKEN }}
+          path: spark-ops
+          commit-message: |
+            deploy: update fit manifests and image to ${{ steps.image-tag.outputs.tag }}
+
+            Source: ${{ github.repository }}@${{ github.sha }}
+            Build: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          branch: deploy/fit-${{ steps.image-tag.outputs.sha }}
+          delete-branch: true
+          title: 'Deploy fit (${{ steps.image-tag.outputs.tag }})'
+          body: |
+            ## Deployment Update
+
+            **Service**: fit
+            **Image Tag**: `${{ steps.image-tag.outputs.tag }}`
+            **Source Commit**: ${{ github.sha }}
+            **Build Run**: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Prerequisite: `bootstrap/fit-postgres.sh` and `bootstrap/fit-secrets.sh` have been run on the Spark host (docs/fit-postgres.md).
+
+            *This PR will be automatically validated and merged by the spark-ops workflow.*
+          labels: |
+            automated-deployment
+            fit
+
   # Single stable required check. Branch protection requires only this name, so
   # adding, renaming or skipping a job above cannot silently drop a requirement.
   ci-gate:
     name: CI gate
     if: always()
-    needs: [merge-freshness, test, security, image]
+    needs: [merge-freshness, test, security, image, manifests]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
@@ -269,7 +428,7 @@ jobs:
           echo "$NEEDS"
           echo "$NEEDS" | jq -e '
             . as $n
-            | ($n.test.result == "success") and ($n.security.result == "success") and ($n.image.result == "success")
+            | ($n.test.result == "success") and ($n.security.result == "success") and ($n.image.result == "success") and ($n.manifests.result == "success")
             and ($n["merge-freshness"].result == "success"
                  or ($n["merge-freshness"].result == "skipped" and "${{ github.event_name }}" != "pull_request"))
           ' > /dev/null || { echo "::error::one or more required jobs did not succeed"; exit 1; }

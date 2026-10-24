@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: fit
+  namespace: fit
+  labels:
+    app: fit
+spec:
+  type: ClusterIP
+  selector:
+    app: fit
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
