@@ -344,6 +344,10 @@ export class ConnectionsService {
           failureCount: 0,
           apiKeyEnc: this.vault.encrypt(key, row.id),
           refreshTokenEnc: null,
+          // Replacing the credential voids any in-flight sync: its lease token no longer matches, so a delayed
+          // failure from the old worker cannot discard the newly saved token/key
+          syncLockToken: null,
+          syncLockUntil: null,
         });
         this.applyGrant(row, grant);
         return this.repo.save(row, manager);
@@ -372,6 +376,8 @@ export class ConnectionsService {
         apiKeyEnc: null,
         accessTokenExpiresAt: null,
         refreshTokenExpiresAt: null,
+        syncLockToken: null,
+        syncLockUntil: null,
       });
       await this.repo.save(locked, manager);
       let deletedActivities = 0;

@@ -551,6 +551,37 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
         )[0].n,
       ).toBe(1);
     });
+
+    it('reconnecting voids an in-flight sync: its delayed 401 cannot discard the newly saved credential', async () => {
+      const newKey = `replacement-${'x'.repeat(8)}-fake-key-for-a`;
+      test.garmin.addKey(newKey, 'account-a');
+      const [{ id }] = await db.query(
+        `SELECT id FROM provider_connections WHERE provider = 'garmin' AND user_id = (SELECT id FROM users WHERE subject = 'garmin-owner-a')`,
+      );
+      await db.query(
+        `UPDATE provider_connections SET sync_lock_until = NULL, sync_lock_token = NULL, backoff_until = NULL, next_sync_at = NULL WHERE id = $1`,
+        [id],
+      );
+      const read = async () =>
+        (await db.query(`SELECT status, api_key_enc, access_token_enc, sync_lock_token, last_error FROM provider_connections WHERE id = $1`, [id]))[0];
+      let afterReconnect: any = null;
+      // Worker A is waiting on Garmin holding a valid lease; meanwhile the user saves a new key
+      test.garmin.duringNextList = async () => {
+        expect((await connectGarmin(test, tokenA, newKey)).submit.status).toBe(200);
+        afterReconnect = await read();
+        test.garmin.failNext.push({ status: 401 }, { status: 401 });
+      };
+      const result = await callTool(test, tokenA, 'refresh_garmin');
+      expect(result.data.status).toBe('failed');
+      expect(result.data.error).toMatch(/lease/);
+      expect(afterReconnect.sync_lock_token).toBeNull();
+      expect(afterReconnect.status).toBe('active');
+      // The new key and token are untouched by the old worker
+      expect(await read()).toEqual({ ...afterReconnect });
+      // And the new credential works
+      expect((await callTool(test, tokenA, 'refresh_garmin')).data.status).toBe('succeeded');
+      expect(logged.join('\n')).not.toContain(newKey);
+    });
   });
 
   describe('per-user isolation', () => {
