@@ -3,6 +3,7 @@
 // while its merge result fails. Runs without dependencies (plain text checks).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { URL } from 'node:url';
 
 const wf = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
 const checks = [
