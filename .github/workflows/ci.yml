@@ -1,0 +1,216 @@
+# Fit CI. Same flow as money (build -> typecheck -> tests on Postgres and
+# PGlite -> container smoke test), plus formatting, lint and security checks.
+# Triggers, jobs and assumptions are documented in docs/ci.md.
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+      - feature/**
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Lint, build and test
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: fit_ci
+          POSTGRES_USER: fit
+          POSTGRES_PASSWORD: fit_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fit -d fit_ci"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        # --no-audit: the audit request can hang until npm's fetch timeout; the security job audits instead
+        run: npm ci --no-audit --no-fund
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify @taico/auth imports
+        run: npm run verify:auth
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test @fit/activity-model
+        run: npx nx run @fit/activity-model:test
+
+      - name: Test backend (Postgres and PGlite, in parallel)
+        # Each test file boots its own app and database. TEST_POSTGRES_URL is the
+        # admin connection: each file creates and drops its own database.
+        run: |
+          set -uo pipefail
+          TEST_POSTGRES_URL=postgresql://fit:fit_ci@127.0.0.1:5432/postgres \
+            npm -w @fit/backend test -- --maxWorkers=2 --ci > test-postgres.log 2>&1 &
+          postgres=$!
+          TEST_POSTGRES_URL='' npm -w @fit/backend test -- --maxWorkers=2 --ci > test-pglite.log 2>&1 &
+          pglite=$!
+          postgres_status=0; wait "$postgres" || postgres_status=$?
+          pglite_status=0; wait "$pglite" || pglite_status=$?
+          echo "::group::Backend tests on Postgres (exit $postgres_status)"; cat test-postgres.log; echo "::endgroup::"
+          echo "::group::Backend tests on PGlite (exit $pglite_status)"; cat test-pglite.log; echo "::endgroup::"
+          [ "$postgres_status" = 0 ] || { echo "::error::Backend tests failed on Postgres"; tail -80 test-postgres.log; }
+          [ "$pglite_status" = 0 ] || { echo "::error::Backend tests failed on PGlite"; tail -80 test-pglite.log; }
+          [ "$postgres_status" = 0 ] && [ "$pglite_status" = 0 ]
+
+  security:
+    name: Security checks
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code (full history for the secret scan)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+
+      - name: Audit production dependencies (blocking)
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Audit all dependencies (report only)
+        # Dev tooling (jest, nest-cli) pulls transitive advisories that never ship in the image
+        run: npm audit --audit-level=high || echo "::warning::npm audit reports advisories in dev dependencies (see log)"
+
+      - name: Scan for committed secrets
+        run: docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.28.0 git /repo --redact --verbose --exit-code 1
+
+  image:
+    name: Build and smoke-test container image
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: fit
+          POSTGRES_USER: fit
+          POSTGRES_PASSWORD: fit_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fit -d fit"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          cleanup: false
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_SUMMARY: 'false'
+          DOCKER_BUILD_RECORD_UPLOAD: 'false'
+        with:
+          context: .
+          load: true
+          platforms: linux/arm64
+          tags: fit:ci
+          cache-from: type=gha
+          cache-to: ${{ github.event_name != 'pull_request' && 'type=gha,mode=max' || '' }}
+
+      - name: Verify image architecture (DGX Spark target)
+        run: |
+          arch=$(docker image inspect fit:ci --format '{{.Architecture}}')
+          echo "image architecture: $arch"
+          [ "$arch" = arm64 ]
+
+      - name: Smoke test image (PostgreSQL, hardened like a deployment)
+        # Production mode: migrations run, /health answers, unauthenticated /api
+        # and /mcp answer 401. Then the container is replaced, as a redeploy
+        # would: migrations are a no-op and data written before is still there.
+        run: |
+          set -euo pipefail
+          key=$(openssl rand -base64 32)
+          url=postgresql://fit:fit_ci@127.0.0.1:5432/fit
+          psql() { docker run --rm --network host postgres:16-alpine psql "$url" -v ON_ERROR_STOP=1 -tA "$@"; }
+          start() {
+            docker run -d --name fit-smoke --network host \
+              --user 1000:1000 --read-only --tmpfs /tmp:size=64m --cap-drop ALL --security-opt no-new-privileges \
+              -e PORT=4190 -e TOKEN_ENCRYPTION_KEY="$key" -e DATABASE_URL="$url" \
+              -e TAICO_ISSUER=https://taico.invalid -e PUBLIC_BASE_URL=http://127.0.0.1:4190 \
+              fit:ci
+            for i in $(seq 1 60); do
+              if curl -sf http://127.0.0.1:4190/health; then echo; break; fi
+              if [ "$i" = 60 ]; then echo "health check timed out"; docker logs fit-smoke; exit 1; fi
+              sleep 1
+            done
+          }
+          start
+          api=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4190/api/activities)
+          mcp=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4190/mcp)
+          echo "/api -> $api, /mcp -> $mcp"
+          if [ "$api" != 401 ] || [ "$mcp" != 401 ]; then docker logs fit-smoke; exit 1; fi
+          migrations=$(psql -c 'SELECT count(*) FROM migrations')
+          [ "$migrations" -gt 0 ] || { echo "no migrations recorded"; exit 1; }
+          psql -c "INSERT INTO users (id, issuer, subject) VALUES (gen_random_uuid(), 'https://smoke.invalid', 'restart-canary')"
+          docker rm -f fit-smoke
+          start
+          again=$(psql -c 'SELECT count(*) FROM migrations')
+          canary=$(psql -c "SELECT count(*) FROM users WHERE subject = 'restart-canary'")
+          [ "$again" = "$migrations" ] || { echo "migrations changed across a restart"; exit 1; }
+          [ "$canary" = 1 ] || { echo "data written before the restart is gone"; exit 1; }
+
+      - name: Check the image refuses unsafe production configuration
+        run: |
+          set -euo pipefail
+          if docker run --rm -e TAICO_ISSUER=https://taico.invalid fit:ci > refuse.log 2>&1; then echo "started without TOKEN_ENCRYPTION_KEY"; exit 1; fi
+          grep -q "TOKEN_ENCRYPTION_KEY is required in production" refuse.log
+          key=$(openssl rand -base64 32)
+          if docker run --rm -e TAICO_ISSUER=https://taico.invalid -e TOKEN_ENCRYPTION_KEY="$key" fit:ci > refuse-db.log 2>&1; then echo "started without a database"; exit 1; fi
+          grep -q "DATABASE_URL is required in production" refuse-db.log
+          user=$(docker image inspect fit:ci --format '{{.Config.User}}')
+          [ "$user" = "1000:1000" ] || { echo "image USER must be 1000:1000, got $user"; exit 1; }
+
+      - name: Show container logs
+        if: always()
+        run: docker logs fit-smoke 2>&1 | tail -50 || true

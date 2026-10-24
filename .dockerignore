@@ -1,0 +1,33 @@
+# Dependencies and build outputs (rebuilt inside the image)
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.nx
+
+# Local data (embedded PGlite)
+**/.data
+
+# Git, CI and editor files
+.git
+.github
+.vscode
+.idea
+.claude
+*.swp
+.DS_Store
+
+# Environment files
+.env
+.env.*
+
+# Docs and tests are not needed in the image
+docs
+**/docs
+*.md
+coverage
+**/test-results
+
+# Docker files
+Dockerfile
+.dockerignore

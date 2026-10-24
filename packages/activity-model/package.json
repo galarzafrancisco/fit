@@ -1,0 +1,23 @@
+{
+  "name": "@fit/activity-model",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Provider-neutral activity model: sport taxonomy and Strava/Garmin normalizers. Pure TypeScript, no framework or I/O.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^24.19.2",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.4.15",
+    "typescript": "^5.9.3"
+  }
+}
