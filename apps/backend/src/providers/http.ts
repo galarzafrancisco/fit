@@ -11,7 +11,7 @@ export class ProviderAuthError extends Error {
   }
 }
 
-export type ProviderResponse = { status: number; body: unknown; headers: Headers };
+export type ProviderResponse = { status: number; body: unknown; /** Raw response text; may be a credential, never log it */ text: string; headers: Headers };
 
 /**
  * One HTTP call to a provider, with a timeout. Network failures and 5xx
@@ -51,7 +51,7 @@ export async function providerRequest(
     );
   }
   if (response.status >= 500) throw new UpstreamError(`${provider} answered HTTP ${response.status}`);
-  return { status: response.status, body, headers: response.headers };
+  return { status: response.status, body, text, headers: response.headers };
 }
 
 export function formBody(values: Record<string, string>): URLSearchParams {

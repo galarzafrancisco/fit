@@ -1,34 +1,46 @@
 import { mapGarminActivity, type NormalizedActivity } from '@fit/activity-model';
-import { Logger } from '@nestjs/common';
-import { NotConfiguredError, UpstreamError } from '../../common/errors';
+import { UpstreamError, ValidationError } from '../../common/errors';
 import type { AppConfig, GarminConfig } from '../../config/env.config';
-import { ProviderAuthError, expiresIn, formBody, providerRequest } from '../http';
-import type { ProviderAccount, ProviderAdapter, TokenGrant } from '../provider.port';
+import { ProviderAuthError, providerRequest } from '../http';
+import type { ProviderAdapter, TokenGrant } from '../provider.port';
 
-type Obj = Record<string, unknown>;
-const isObj = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
+/** Path of the key-to-token exchange, from Garmin's official Personal API documentation and client */
+export const GARMIN_TOKEN_PATH = '/personalapitoken-service/personal-api/personal-api-key/token';
+export const GARMIN_ACTIVITY_SEARCH_PATH = '/activitylist-service/activities/search/activities';
 
-/** Garmin caps one backfill request's window; longer ranges are requested in chunks */
-export const GARMIN_BACKFILL_CHUNK_DAYS = 30;
+export type GarminListQuery = {
+  /** Offset into the newest-first list */
+  start: number;
+  limit: number;
+  /** Inclusive lower bound (YYYY-MM-DD) on the activity start date */
+  startDate?: string;
+};
 
 /**
- * Garmin Connect Developer Program, Activity API (OAuth 2.0 with PKCE, Push
- * or Ping/Pull delivery). Access to this API is approval-based and requires
- * a Garmin developer-program account: see docs/providers/garmin.md for the
- * exact prerequisites. There is no pull-on-demand listing; activities arrive
- * by webhook, and history arrives by webhook after a backfill request.
+ * Garmin Connect Personal API (https://developer.garmin.com/gc-developer-program/personal/).
  *
- * Endpoint paths follow Garmin's published OAuth2 PKCE and Activity API
- * specifications; every URL is configurable in case Garmin moves them.
+ * - Authentication: the user's personal API key (`Authorization: ApiKey <key>`)
+ *   is exchanged at the token endpoint for a JWT bearer token valid 24 hours
+ *   (or until the key expires). There are no refresh tokens: a new token is
+ *   obtained from the key. There is NO OAuth flow.
+ * - Data: `GET /activitylist-service/activities/search/activities` with
+ *   offset paging (`start`, `limit`), newest first, optional `startDate`.
+ * - The key is personal: it belongs to one Garmin account and one Fit user,
+ *   and is only ever sent to Garmin from the server.
+ *
+ * Nothing here logs request or response bodies or the key. Errors carry
+ * only the HTTP status.
  */
 export class GarminAdapter implements ProviderAdapter {
   readonly provider = 'garmin' as const;
-  readonly syncMode = 'push' as const;
-  readonly usesPkce = true;
-  readonly requiredScopes = ['ACTIVITY_EXPORT'];
+  readonly syncMode = 'pull' as const;
+  readonly authKind = 'api_key' as const;
+  readonly usesPkce = false;
+  readonly requiredScopes: string[] = [];
+  /** No server-side credentials are needed: every user brings their own key */
+  readonly configured = true;
   private readonly config: GarminConfig;
   private readonly timeoutMs: number;
-  private readonly logger = new Logger('GarminAdapter');
 
   constructor(
     appConfig: AppConfig,
@@ -38,139 +50,83 @@ export class GarminAdapter implements ProviderAdapter {
     this.timeoutMs = appConfig.sync.requestTimeoutMs;
   }
 
-  get configured(): boolean {
-    return Boolean(this.config.clientId && this.config.clientSecret);
+  assertConfigured(): void {
+    // Nothing to configure server-side
   }
 
-  /** Host that Ping notification callback URLs must point to */
-  get apiHost(): string {
-    return new URL(this.config.apiBaseUrl).host;
+  authorizationUrl(): string {
+    throw new ValidationError('Garmin does not use an OAuth flow. Use connect_garmin to supply your personal API key');
   }
 
-  authorizationUrl({ state, codeChallenge }: { state: string; codeChallenge: string | null }): string {
-    if (!codeChallenge) throw new Error('Garmin requires PKCE');
-    const url = new URL(this.config.authorizeUrl);
-    url.search = new URLSearchParams({
-      client_id: this.credentials().clientId,
-      response_type: 'code',
-      redirect_uri: this.config.redirectUri,
-      state,
-      code_challenge: codeChallenge,
-      code_challenge_method: 'S256',
-    }).toString();
-    return url.toString();
+  exchangeCode(): never {
+    throw new ValidationError('Garmin does not use an OAuth flow. Use connect_garmin to supply your personal API key');
   }
 
-  async exchangeCode({ code, codeVerifier }: { code: string; codeVerifier: string | null }): Promise<{ grant: TokenGrant; account: ProviderAccount }> {
-    if (!codeVerifier) throw new Error('Garmin requires PKCE');
-    const grant = await this.token({ grant_type: 'authorization_code', code, code_verifier: codeVerifier, redirect_uri: this.config.redirectUri });
-    const idResponse = await this.api(grant.accessToken, `${this.config.apiBaseUrl}/wellness-api/rest/user/id`);
-    const userId = isObj(idResponse.body) && typeof idResponse.body.userId === 'string' ? idResponse.body.userId : null;
-    if (idResponse.status !== 200 || !userId) throw new UpstreamError(`Garmin user ID lookup answered HTTP ${idResponse.status}`);
-    // The token's OAuth scopes are coarse; the per-user data permissions (ACTIVITY_EXPORT, ...) come from this endpoint
-    const scopes = (await this.permissions(grant.accessToken)) ?? grant.scopes;
-    return { grant: { ...grant, scopes }, account: { externalUserId: userId, displayName: null } };
+  refresh(): never {
+    throw new ValidationError('Garmin tokens are obtained from the personal API key, not refreshed');
   }
 
-  async refresh(refreshToken: string): Promise<TokenGrant> {
-    return this.token({ grant_type: 'refresh_token', refresh_token: refreshToken });
-  }
-
-  /** Deregisters the user from Fit's Garmin app, which stops pushes */
-  async revoke(accessToken: string): Promise<void> {
-    try {
-      await providerRequest(this.fetchImpl, 'Garmin', `${this.config.apiBaseUrl}/wellness-api/rest/user/registration`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${accessToken}` },
-        timeoutMs: this.timeoutMs,
-      });
-    } catch (error) {
-      this.logger.warn(`Garmin deregistration failed: ${(error as Error).message}`);
-    }
+  /** Garmin has no API to revoke a key: the user deletes it in Garmin Connect. Fit just forgets it */
+  async revoke(): Promise<void> {
+    // Intentionally empty
   }
 
   normalize(raw: unknown): NormalizedActivity {
     return mapGarminActivity(raw);
   }
 
-  /** Asks Garmin to push activity summaries for [after, before), in chunks Garmin accepts. 409 = already requested */
-  async requestBackfill(accessToken: string, input: { after: Date; before: Date }): Promise<void> {
-    const chunk = GARMIN_BACKFILL_CHUNK_DAYS * 86_400;
-    const end = Math.floor(input.before.getTime() / 1000);
-    for (let start = Math.floor(input.after.getTime() / 1000); start < end; start += chunk) {
-      const url = new URL(`${this.config.apiBaseUrl}/wellness-api/rest/backfill/activities`);
-      url.search = new URLSearchParams({ summaryStartTimeInSeconds: String(start), summaryEndTimeInSeconds: String(Math.min(start + chunk, end)) }).toString();
-      const response = await this.api(accessToken, url.toString());
-      if (response.status !== 202 && response.status !== 200 && response.status !== 409) {
-        throw new UpstreamError(`Garmin backfill request answered HTTP ${response.status}`);
-      }
-    }
-  }
-
   /**
-   * Ping/Pull: fetches the activity summaries a Ping notification points to.
-   * Only URLs on Garmin's API host are followed, so a forged ping cannot make
-   * Fit send a user's token elsewhere.
+   * Exchanges the personal API key for a bearer token. Rejected keys (wrong,
+   * deleted or expired) raise ProviderAuthError; rate limits and outages raise
+   * the usual retryable upstream errors.
    */
-  async fetchCallback(accessToken: string, callbackUrl: string): Promise<unknown[]> {
-    let url: URL;
-    try {
-      url = new URL(callbackUrl);
-    } catch {
-      throw new UpstreamError('Garmin ping callback URL is not a URL');
+  async obtainToken(apiKey: string): Promise<TokenGrant> {
+    const response = await providerRequest(this.fetchImpl, 'Garmin', `${this.config.apiBaseUrl}${GARMIN_TOKEN_PATH}`, {
+      method: 'POST',
+      headers: { Authorization: `ApiKey ${apiKey}`, Accept: '*/*' },
+      timeoutMs: this.timeoutMs,
+    });
+    if (response.status === 400 || response.status === 401 || response.status === 403) {
+      throw new ProviderAuthError('garmin', 'Garmin rejected the personal API key (wrong, deleted or expired)');
     }
-    const expected = new URL(this.config.apiBaseUrl);
-    if (url.protocol !== expected.protocol || url.host !== expected.host) throw new UpstreamError('Garmin ping callback URL is not on the Garmin API host');
-    const response = await this.api(accessToken, url.toString());
-    if (response.status !== 200 || !Array.isArray(response.body)) throw new UpstreamError(`Garmin ping callback answered HTTP ${response.status}`);
-    return response.body;
+    const accessToken = response.text.trim();
+    if (response.status !== 200 || !accessToken) throw new UpstreamError(`Garmin token endpoint answered HTTP ${response.status}`);
+    return { accessToken, refreshToken: null, accessTokenExpiresAt: jwtExpiry(accessToken), refreshTokenExpiresAt: null, scopes: null };
   }
 
-  private async permissions(accessToken: string): Promise<string[] | null> {
-    const response = await this.api(accessToken, `${this.config.apiBaseUrl}/wellness-api/rest/user/permissions`);
-    return response.status === 200 && Array.isArray(response.body) ? response.body.filter((p): p is string => typeof p === 'string') : null;
-  }
-
-  private async api(accessToken: string, url: string) {
-    const response = await providerRequest(this.fetchImpl, 'Garmin', url, {
+  /** One page of the user's activities, newest first */
+  async listPage(accessToken: string, query: GarminListQuery): Promise<unknown[]> {
+    const url = new URL(`${this.config.apiBaseUrl}${GARMIN_ACTIVITY_SEARCH_PATH}`);
+    url.searchParams.set('start', String(query.start));
+    url.searchParams.set('limit', String(query.limit));
+    if (query.startDate) url.searchParams.set('startDate', query.startDate);
+    const response = await providerRequest(this.fetchImpl, 'Garmin', url.toString(), {
       headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
       timeoutMs: this.timeoutMs,
     });
-    if (response.status === 401) throw new ProviderAuthError('garmin', 'Garmin rejected the access token');
-    return response;
+    if (response.status === 401 || response.status === 403) throw new ProviderAuthError('garmin', 'Garmin rejected the access token');
+    if (response.status !== 200) throw new UpstreamError(`Garmin activity list answered HTTP ${response.status}`);
+    return activityItems(response.body);
   }
+}
 
-  private async token(params: Record<string, string>): Promise<TokenGrant> {
-    const { clientId, clientSecret } = this.credentials();
-    const response = await providerRequest(this.fetchImpl, 'Garmin', this.config.tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-      body: formBody({ client_id: clientId, client_secret: clientSecret, ...params }),
-      timeoutMs: this.timeoutMs,
-    });
-    if (response.status === 400 || response.status === 401) throw new ProviderAuthError('garmin', 'Garmin refused the authorization grant');
-    const body = response.body;
-    if (response.status !== 200 || !isObj(body) || typeof body.access_token !== 'string')
-      throw new UpstreamError(`Garmin token endpoint answered HTTP ${response.status}`);
-    return {
-      accessToken: body.access_token,
-      refreshToken: typeof body.refresh_token === 'string' ? body.refresh_token : null,
-      accessTokenExpiresAt: expiresIn(body.expires_in),
-      refreshTokenExpiresAt: expiresIn(body.refresh_token_expires_in),
-      scopes: typeof body.scope === 'string' ? body.scope.split(/[\s,]+/).filter(Boolean) : null,
-    };
+/** The list is a JSON array; tolerate it wrapped in an object (`activities` / `activityList`) */
+function activityItems(body: unknown): unknown[] {
+  if (Array.isArray(body)) return body;
+  if (typeof body === 'object' && body !== null) {
+    const wrapped = (body as Record<string, unknown>).activities ?? (body as Record<string, unknown>).activityList;
+    if (Array.isArray(wrapped)) return wrapped;
   }
+  if (body === null) return [];
+  throw new UpstreamError('Garmin activity list had an unexpected shape');
+}
 
-  assertConfigured(): void {
-    this.credentials();
-  }
-
-  private credentials(): { clientId: string; clientSecret: string } {
-    if (!this.config.clientId || !this.config.clientSecret) {
-      throw new NotConfiguredError(
-        'Garmin is not configured on this server. It needs an approved Garmin Connect Developer Program app (GARMIN_CLIENT_ID, GARMIN_CLIENT_SECRET); see docs/providers/garmin.md',
-      );
-    }
-    return { clientId: this.config.clientId, clientSecret: this.config.clientSecret };
+/** Expiry from the JWT's `exp` claim (signature is not verified; it is only used to know when to ask for a new token) */
+export function jwtExpiry(token: string): Date | null {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8')) as { exp?: unknown };
+    return typeof payload.exp === 'number' && Number.isFinite(payload.exp) ? new Date(payload.exp * 1000) : null;
+  } catch {
+    return null;
   }
 }

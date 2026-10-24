@@ -69,6 +69,23 @@ export class ConnectionsRepository {
     });
   }
 
+  /** Reads a state without using it (the Garmin key page shows who the link belongs to before the key is submitted) */
+  findState(stateHash: string): Promise<OAuthStateEntity | null> {
+    return this.uow.manager.findOne(OAuthStateEntity, { where: { stateHash } });
+  }
+
+  /** Active Garmin connections due for a poll, soonest first */
+  dueGarminConnections(now: Date, limit: number): Promise<ProviderConnectionEntity[]> {
+    return this.uow.manager
+      .createQueryBuilder(ProviderConnectionEntity, 'c')
+      .where(`c.provider = 'garmin' AND c.status = 'active'`)
+      .andWhere('(c.next_sync_at IS NULL OR c.next_sync_at <= :now)', { now })
+      .andWhere('(c.backoff_until IS NULL OR c.backoff_until <= :now)', { now })
+      .orderBy('c.next_sync_at', 'ASC', 'NULLS FIRST')
+      .limit(limit)
+      .getMany();
+  }
+
   async purgeExpiredStates(now = new Date()): Promise<void> {
     await this.uow.manager.delete(OAuthStateEntity, { expiresAt: LessThan(now) });
   }

@@ -22,11 +22,4 @@ export class WebhooksController {
   strava(@Param('secret') secret: string, @Body() body: unknown) {
     return this.inbox.receiveStrava(secret, body);
   }
-
-  /** Garmin Push and Ping notifications (all summary types share this URL) */
-  @Post('garmin/:secret')
-  @HttpCode(200)
-  garmin(@Param('secret') secret: string, @Body() body: unknown) {
-    return this.inbox.receiveGarmin(secret, body);
-  }
 }

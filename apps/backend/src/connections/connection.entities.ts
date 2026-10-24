@@ -54,6 +54,29 @@ export class ProviderConnectionEntity {
   @Column({ name: 'refresh_token_expires_at', type: 'timestamptz', nullable: true })
   refreshTokenExpiresAt: Date | null;
 
+  /** Garmin Personal API key, encrypted with the row ID as associated data. Never returned by any API */
+  @Column({ name: 'api_key_enc', type: 'text', nullable: true })
+  apiKeyEnc: string | null;
+
+  /** Garmin: activities already walked through in the newest-first history listing (next page starts here) */
+  @Column({ name: 'history_offset', type: 'int', default: 0 })
+  historyOffset: number;
+
+  /** Garmin: the history walk reached the end (or its configured limit) */
+  @Column({ name: 'history_complete', type: 'boolean', default: false })
+  historyComplete: boolean;
+
+  /** Garmin: the scheduler does not touch this connection before this time */
+  @Column({ name: 'next_sync_at', type: 'timestamptz', nullable: true })
+  nextSyncAt: Date | null;
+
+  /** Garmin: set after repeated provider failures or rate limiting; exponential, capped */
+  @Column({ name: 'backoff_until', type: 'timestamptz', nullable: true })
+  backoffUntil: Date | null;
+
+  @Column({ name: 'failure_count', type: 'int', default: 0 })
+  failureCount: number;
+
   /** End of the last complete sync window; the next incremental sync starts here minus SYNC_OVERLAP_HOURS */
   @Column({ name: 'sync_cursor', type: 'timestamptz', nullable: true })
   syncCursor: Date | null;

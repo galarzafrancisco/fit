@@ -1,5 +1,6 @@
-import { Controller, Get, Logger, Param, Query, Res } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Param, Post, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
+import { GarminSyncService } from '../sync/garmin-sync.service';
 import { SyncService } from '../sync/sync.service';
 import { ConnectCallbackError, ConnectionsService, capitalize } from './connections.service';
 
@@ -16,12 +17,67 @@ export class ConnectCallbackController {
   constructor(
     private readonly connections: ConnectionsService,
     private readonly sync: SyncService,
+    private readonly garminSync: GarminSyncService,
   ) {}
+
+  /**
+   * Garmin Personal API key page. Reached through the single-use link that
+   * connect_garmin created for an authenticated Fit user; the link (hashed in
+   * the database) is the only thing that selects the user, never a query
+   * parameter naming one. Shows whose account the key will be attached to.
+   */
+  @Get('garmin')
+  async garminForm(@Query('link') link: unknown, @Res() res: Response): Promise<void> {
+    securityHeaders(res);
+    const preview = await this.connections.previewGarminLink(typeof link === 'string' ? link : undefined);
+    if (!preview) {
+      res
+        .status(400)
+        .type('html')
+        .send(page('Link not valid', 'This link is invalid, expired or already used. Ask your AI assistant for a new one with connect_garmin.'));
+      return;
+    }
+    res
+      .status(200)
+      .type('html')
+      .send(keyPage(preview.label, link as string));
+  }
+
+  @Post('garmin')
+  async garminSubmit(@Body() body: Record<string, unknown> | undefined, @Res() res: Response): Promise<void> {
+    securityHeaders(res);
+    const text = (key: string) => (typeof body?.[key] === 'string' ? (body[key] as string) : undefined);
+    try {
+      const { connection } = await this.connections.completeGarminKey(text('link'), text('apiKey'));
+      this.garminSync.startInitialSync(connection);
+      res
+        .status(200)
+        .type('html')
+        .send(
+          page(
+            'Garmin connected',
+            'Your Garmin Personal API key is stored encrypted and will not be shown again. Fit is importing your activities, newest first, and will keep checking for new ones. You can close this tab and ask your AI assistant about your training.',
+          ),
+        );
+    } catch (error) {
+      if (error instanceof ConnectCallbackError) {
+        res.status(400).type('html').send(page('Connection not completed', error.message));
+        return;
+      }
+      this.logger.error('Garmin key submission failed', (error as Error).constructor.name);
+      res
+        .status(502)
+        .type('html')
+        .send(
+          page('Connection not completed', 'Something went wrong talking to Garmin. Ask for a new link with connect_garmin and try again in a few minutes.'),
+        );
+    }
+  }
 
   @Get(':provider/callback')
   async callback(@Param('provider') provider: string, @Query() query: Record<string, unknown>, @Res() res: Response): Promise<void> {
     const text = (key: string) => (typeof query[key] === 'string' ? (query[key] as string) : undefined);
-    res.set({ 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'" });
+    securityHeaders(res);
     try {
       const { connection } = await this.connections.completeConnect({
         provider,
@@ -36,11 +92,7 @@ export class ConnectCallbackController {
         .status(200)
         .type('html')
         .send(
-          page(
-            `${name} connected`,
-            `Fit is importing your ${name} activities now. You can close this tab and ask your AI assistant about your training.` +
-              (connection.provider === 'garmin' ? ' Garmin sends history in the background, so older activities can take a while to appear.' : ''),
-          ),
+          page(`${name} connected`, `Fit is importing your ${name} activities now. You can close this tab and ask your AI assistant about your training.` + ''),
         );
     } catch (error) {
       if (error instanceof ConnectCallbackError) {
@@ -51,6 +103,29 @@ export class ConnectCallbackController {
       res.status(502).type('html').send(page('Connection not completed', 'Something went wrong talking to the provider. Please try again in a few minutes.'));
     }
   }
+}
+
+function securityHeaders(res: Response): void {
+  res.set({
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Frame-Options': 'DENY',
+    'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
+  });
+}
+
+function keyPage(label: string, link: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Connect Garmin · Fit</title>
+<style>body{font-family:system-ui,-apple-system,sans-serif;max-width:34rem;margin:10vh auto;padding:0 1.5rem;color:#1d2433;line-height:1.5}h1{font-size:1.4rem}input[type=password]{width:100%;box-sizing:border-box;padding:.6rem;font:inherit}button{margin-top:1rem;padding:.6rem 1.2rem;font:inherit}small{color:#556}</style></head>
+<body><h1>Connect Garmin to Fit</h1>
+<p>This attaches a Garmin Connect Personal API key to the Fit account <strong>${escapeHtml(label)}</strong>. If that is not you, close this page.</p>
+<form method="post" action="/connect/garmin" autocomplete="off">
+<input type="hidden" name="link" value="${escapeHtml(link)}">
+<label for="apiKey">Your Garmin Personal API key</label>
+<input id="apiKey" name="apiKey" type="password" required autocomplete="off" autocapitalize="off" spellcheck="false">
+<button type="submit">Save key</button>
+</form>
+<p><small>Create the key in Garmin Connect on the web (Account &rarr; Personal API Key). It is personal: use your own, only for your own data. Fit validates it with Garmin, stores it encrypted and never shows it again. Deleting the key in Garmin Connect revokes Fit's access.</small></p></body></html>`;
 }
 
 function page(title: string, message: string): string {

@@ -13,13 +13,12 @@ import { loadConfig, type AppConfig } from '../config/env.config';
 import { configureApp } from '../configure-app';
 import { SyncService } from '../sync/sync.service';
 import { WebhookWorker } from '../webhooks/webhook-worker.service';
-import { FakeGarmin, FakeStrava, GARMIN_API, GARMIN_AUTHORIZE, GARMIN_TOKEN, STRAVA_API, STRAVA_OAUTH, providerFetch } from './fake-providers';
+import { FakeGarmin, FakeStrava, GARMIN_API, STRAVA_API, STRAVA_OAUTH, providerFetch } from './fake-providers';
 
 export const ISSUER = 'https://taico.test';
 export const BASE_URL = 'http://fit.test';
 export const STRAVA_WEBHOOK_SECRET = 'strava-webhook-secret-0123456789abcdef';
 export const STRAVA_SUBSCRIPTION_ID = '777';
-export const GARMIN_WEBHOOK_SECRET = 'garmin-webhook-secret-0123456789abcdef';
 
 export type TestApp = {
   app: INestApplication;
@@ -144,12 +143,10 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
     STRAVA_API_BASE_URL: STRAVA_API,
     STRAVA_WEBHOOK_SECRET,
     STRAVA_WEBHOOK_SUBSCRIPTION_ID: STRAVA_SUBSCRIPTION_ID,
-    GARMIN_CLIENT_ID: 'garmin-client',
-    GARMIN_CLIENT_SECRET: 'garmin-secret',
-    GARMIN_AUTHORIZE_URL: GARMIN_AUTHORIZE,
-    GARMIN_TOKEN_URL: GARMIN_TOKEN,
     GARMIN_API_BASE_URL: GARMIN_API,
-    GARMIN_WEBHOOK_SECRET,
+    GARMIN_PAGE_SIZE: '5',
+    GARMIN_MAX_PAGES_PER_RUN: '2',
+    GARMIN_MANUAL_MIN_INTERVAL_SECONDS: '0',
     WEBHOOK_RETRY_BASE_MS: '60000',
     ...options.env,
   } as NodeJS.ProcessEnv);
@@ -261,14 +258,20 @@ export async function connectStrava(test: TestApp, token: string, athleteId: str
   return callback;
 }
 
-export async function connectGarmin(test: TestApp, token: string, garminUserId: string) {
-  const started = await callTool(test, token, 'connect_provider', { provider: 'garmin' });
-  if (started.isError) throw new Error(`connect_provider failed: ${JSON.stringify(started.data)}`);
-  const url = started.data.authorizationUrl as string;
-  const code = test.garmin.approve(url, garminUserId);
-  const callback = await test.http.get('/connect/garmin/callback').query({ state: new URL(url).searchParams.get('state')!, code });
+/**
+ * Runs the whole Garmin connection as a user would: connect_garmin over MCP,
+ * the browser opening the link and submitting the user's own API key, and the
+ * initial sync finishing. Returns the page responses.
+ */
+export async function connectGarmin(test: TestApp, token: string, apiKey: string) {
+  const started = await callTool(test, token, 'connect_garmin');
+  if (started.isError) throw new Error(`connect_garmin failed: ${JSON.stringify(started.data)}`);
+  const url = new URL(started.data.connectUrl as string);
+  const link = url.searchParams.get('link')!;
+  const form = await test.http.get(url.pathname).query({ link });
+  const submit = await test.http.post('/connect/garmin').type('form').send({ link, apiKey });
   await syncIdle(test);
-  return callback;
+  return { started: started.data, form, submit, link };
 }
 
 /** Waits for background syncs started by OAuth callbacks */

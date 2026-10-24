@@ -1,4 +1,4 @@
-import { bool, id, isObject, latLng, nonNegative, num, positive, str } from './fields';
+import { bool, id, isObject, latLng, nonNegative, positive, str } from './fields';
 import { ActivityMappingError, type NormalizedActivity, type Sport } from './model';
 
 /**
@@ -109,7 +109,9 @@ export function mapGarminActivity(raw: unknown): NormalizedActivity {
     maxHeartRate: positive(raw.maxHR),
     averagePowerWatts: positive(raw.avgPower),
     averageCadence:
-      positive(raw.averageRunningCadenceInStepsPerMinute) ?? positive(raw.averageBikingCadenceInRevPerMinute) ?? positive(raw.averageSwimCadenceInStrokesPerMinute),
+      positive(raw.averageRunningCadenceInStepsPerMinute) ??
+      positive(raw.averageBikingCadenceInRevPerMinute) ??
+      positive(raw.averageSwimCadenceInStrokesPerMinute),
     calories: positive(raw.calories),
     deviceName: str(raw.deviceName, 255) ?? str(raw.manufacturer, 255),
     manual: bool(raw.manualActivity) ?? false,

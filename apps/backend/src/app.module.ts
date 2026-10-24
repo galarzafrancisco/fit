@@ -21,6 +21,7 @@ import { McpController } from './mcp/mcp.controller';
 import { FitMcpServerFactory } from './mcp/fit-mcp.server';
 import { ProviderRegistry, createProviderAdapters } from './providers/provider-registry';
 import { PROVIDER_ADAPTERS } from './providers/provider.port';
+import { GarminSyncService } from './sync/garmin-sync.service';
 import { SyncService } from './sync/sync.service';
 import { UsersRepository } from './users/users.repository';
 import { UsersService } from './users/users.service';
@@ -69,6 +70,7 @@ export class AppModule {
         ActivityIngestService,
         ActivitiesService,
         SyncService,
+        GarminSyncService,
         WebhookInboxService,
         WebhookHandlers,
         WebhookWorker,

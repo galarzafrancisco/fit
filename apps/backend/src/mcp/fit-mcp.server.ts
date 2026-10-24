@@ -12,10 +12,10 @@ import { WebhookInboxService } from '../webhooks/webhook-inbox.service';
 
 const INSTRUCTIONS =
   "Fit holds the signed-in user's workouts imported from Strava and Garmin, normalized to one model. " +
-  'Typical flow: list_connections to see what is connected; connect_provider returns a link the user opens in a browser to connect a provider; ' +
+  'Typical flow: list_connections to see what is connected; connect_provider returns a link the user opens in a browser to connect Strava; connect_garmin returns a link where the user pastes their own Garmin Personal API key (never ask for or accept the key in chat); ' +
   'list_activities (filter by from/to dates, provider, sport or sportGroup, search) and get_activity for detail; get_activity_summary for totals by sport, week, month and so on. ' +
   'Distances are meters (distanceKm is provided), durations seconds, speeds km/h, dates ISO 8601 UTC with startTimeLocal for the local wall clock. ' +
-  'New activities arrive automatically by webhook; sync_provider catches up on demand. Fit only reads from providers; it never changes anything there.';
+  'New Strava activities arrive by webhook and Garmin is polled on a schedule (newest history first); sync_provider / refresh_garmin catch up on demand. Fit only reads from providers; it never changes anything there.';
 
 /**
  * The MCP adapter. Tools hold no business rules: each calls the same service
@@ -53,17 +53,31 @@ export class FitMcpServerFactory {
 
     tool(
       'list_connections',
-      'Strava and Garmin connection status for the user: whether each provider is available on this server, connected, its status (active, needs_reauth, revoked, disconnected), last sync, last error and activity count',
+      'Strava and Garmin connection status for the user: whether each provider is available on this server, how it authenticates (authMethod), connected, its status (active, needs_reauth, revoked, disconnected), Garmin history import progress and next poll, last sync, last error and activity count. Never includes credentials',
       read,
       {},
       () => this.connections.list(user),
     );
     tool(
       'connect_provider',
-      'Start connecting Strava or Garmin. Returns authorizationUrl: give it to the user to open in a browser and approve read access. The link works once and expires in about 15 minutes. After approval Fit imports activities automatically',
+      'Start connecting Strava (Garmin uses connect_garmin). Returns authorizationUrl: give it to the user to open in a browser and approve read access. The link works once and expires in about 15 minutes. After approval Fit imports activities automatically',
       write,
       { provider: providerSchema },
       ({ provider }) => this.connections.startConnect(user, provider),
+    );
+    tool(
+      'connect_garmin',
+      "Start connecting the user's own Garmin account via a Garmin Connect Personal API key. Returns connectUrl: give it to the user to open in a browser and paste their key (the key must never be pasted into chat or sent through this tool). The link is single-use, expires in about 15 minutes and is bound to the signed-in Fit user. Afterwards Fit imports activities newest first and polls for new ones",
+      write,
+      {},
+      () => this.connections.startGarminLink(user),
+    );
+    tool(
+      'refresh_garmin',
+      'Sync Garmin now: fetch new activities and continue the history import. Safe to call repeatedly: it returns the current or most recent run (with a note) instead of calling Garmin again if a sync is running, just finished, or Garmin is being given time to recover. Never returns credentials',
+      write,
+      {},
+      () => this.sync.syncForUser(user, { provider: 'garmin' }),
     );
     tool(
       'disconnect_provider',
@@ -74,7 +88,7 @@ export class FitMcpServerFactory {
     );
     tool(
       'sync_provider',
-      'Catch up with a provider now. Strava: imports activities since the last sync (or since `since`) and returns counts. Garmin: asks Garmin to re-send history, which arrives in the background',
+      'Catch up with a provider now. Strava: imports activities since the last sync (or since `since`) and returns counts. Garmin: same as refresh_garmin (`since` is ignored; Garmin syncs from its own cursor)',
       write,
       syncShape,
       (args) => this.sync.syncForUser(user, args),

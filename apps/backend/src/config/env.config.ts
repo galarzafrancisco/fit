@@ -81,22 +81,40 @@ export type StravaConfig = {
   webhookUrl: string | null;
 };
 
+/**
+ * Garmin Connect Personal API. No server-wide credentials exist: every user
+ * supplies their own key (see docs/providers/garmin.md). These are only
+ * endpoints and polling behavior.
+ */
 export type GarminConfig = {
-  clientId: string | null;
-  clientSecret: string | null;
-  authorizeUrl: string;
-  tokenUrl: string;
   apiBaseUrl: string;
-  redirectUri: string;
-  /** Last path segment of the Push/Ping endpoint URLs registered in the Garmin developer portal */
-  webhookSecret: string | null;
-  webhookUrl: string | null;
-  /** Request a history backfill on connect (needs a Garmin tier that grants historical data) */
-  backfillOnConnect: boolean;
+  /** Run the background poller in this process */
+  pollerEnabled: boolean;
+  /** How often the poller looks for connections that are due */
+  tickIntervalMs: number;
+  /** Time between polls of one connection */
+  pollIntervalMs: number;
+  /** Connections synced at the same time */
+  concurrency: number;
+  /** Activities per page requested from the activity list */
+  pageSize: number;
+  /** Pages fetched in one run; a longer history walk resumes on the next run */
+  maxPagesPerRun: number;
+  /** The history walk stops after this many activities (0: until Garmin has no more) */
+  historyMaxActivities: number;
+  /** Pause between two requests to Garmin from one sync */
+  minRequestIntervalMs: number;
+  /** Retries of one request (network, 5xx, 429) before the run gives up */
+  maxRetries: number;
+  /** First retry delay; doubles per attempt (a Retry-After header wins) */
+  retryBaseMs: number;
+  /** Upper bound for any retry or backoff delay */
+  maxBackoffMs: number;
+  /** A manual refresh within this many seconds of the last run returns that run's status instead of calling Garmin */
+  manualMinIntervalSeconds: number;
 };
 
 export const STRAVA_WEBHOOK_PATH = '/webhooks/strava';
-export const GARMIN_WEBHOOK_PATH = '/webhooks/garmin';
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const nodeEnv = parseNodeEnv(env.NODE_ENV);
@@ -129,7 +147,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     tokenEncryptionKey,
     tokenEncryptionKeyEphemeral,
     strava: loadStravaConfig(env, publicBaseUrl),
-    garmin: loadGarminConfig(env, publicBaseUrl),
+    garmin: loadGarminConfig(env, nodeEnv),
     oauth: { stateTtlSeconds: intEnv(env, 'OAUTH_STATE_TTL_SECONDS', 900, 60, 3600) },
     sync: {
       initialDays: intEnv(env, 'SYNC_INITIAL_DAYS', 90, 1, 3660),
@@ -169,21 +187,21 @@ function loadStravaConfig(env: NodeJS.ProcessEnv, publicBaseUrl: string): Strava
   };
 }
 
-function loadGarminConfig(env: NodeJS.ProcessEnv, publicBaseUrl: string): GarminConfig {
-  const clientId = blank(env.GARMIN_CLIENT_ID);
-  const clientSecret = blank(env.GARMIN_CLIENT_SECRET);
-  if (Boolean(clientId) !== Boolean(clientSecret)) throw new Error('Set both GARMIN_CLIENT_ID and GARMIN_CLIENT_SECRET, or neither');
-  const webhookSecret = webhookSecretEnv(env, 'GARMIN_WEBHOOK_SECRET');
+function loadGarminConfig(env: NodeJS.ProcessEnv, nodeEnv: AppConfig['nodeEnv']): GarminConfig {
   return {
-    clientId,
-    clientSecret,
-    authorizeUrl: urlEnv(env, 'GARMIN_AUTHORIZE_URL', 'https://connect.garmin.com/oauth2Confirm'),
-    tokenUrl: urlEnv(env, 'GARMIN_TOKEN_URL', 'https://diauth.garmin.com/di-oauth2-service/oauth/token'),
-    apiBaseUrl: urlEnv(env, 'GARMIN_API_BASE_URL', 'https://apis.garmin.com'),
-    redirectUri: `${publicBaseUrl}/connect/garmin/callback`,
-    webhookSecret,
-    webhookUrl: webhookSecret ? `${publicBaseUrl}${GARMIN_WEBHOOK_PATH}/${webhookSecret}` : null,
-    backfillOnConnect: (env.GARMIN_BACKFILL_ON_CONNECT ?? 'true') === 'true',
+    apiBaseUrl: urlEnv(env, 'GARMIN_API_BASE_URL', 'https://personal.connectapi.garmin.com'),
+    pollerEnabled: (env.GARMIN_POLLER_ENABLED ?? (nodeEnv === 'test' ? 'false' : 'true')) === 'true',
+    tickIntervalMs: intEnv(env, 'GARMIN_TICK_INTERVAL_MS', 60_000, 50, 3_600_000),
+    pollIntervalMs: intEnv(env, 'GARMIN_POLL_INTERVAL_MINUTES', 30, 1, 1440) * 60_000,
+    concurrency: intEnv(env, 'GARMIN_SYNC_CONCURRENCY', 2, 1, 10),
+    pageSize: intEnv(env, 'GARMIN_PAGE_SIZE', 20, 1, 100),
+    maxPagesPerRun: intEnv(env, 'GARMIN_MAX_PAGES_PER_RUN', 10, 1, 1000),
+    historyMaxActivities: intEnv(env, 'GARMIN_HISTORY_MAX_ACTIVITIES', 10_000, 0, 1_000_000),
+    minRequestIntervalMs: intEnv(env, 'GARMIN_MIN_REQUEST_INTERVAL_MS', nodeEnv === 'test' ? 0 : 1000, 0, 60_000),
+    maxRetries: intEnv(env, 'GARMIN_MAX_RETRIES', 3, 0, 10),
+    retryBaseMs: intEnv(env, 'GARMIN_RETRY_BASE_MS', nodeEnv === 'test' ? 0 : 2000, 0, 600_000),
+    maxBackoffMs: intEnv(env, 'GARMIN_MAX_BACKOFF_MINUTES', 120, 0, 1440) * 60_000,
+    manualMinIntervalSeconds: intEnv(env, 'GARMIN_MANUAL_MIN_INTERVAL_SECONDS', 60, 0, 3600),
   };
 }
 

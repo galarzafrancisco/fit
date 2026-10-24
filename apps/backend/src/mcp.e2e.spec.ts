@@ -26,6 +26,7 @@ describe('MCP interface', () => {
     const tools = Object.fromEntries(res.body.result.tools.map((t: any) => [t.name, t]));
     expect(Object.keys(tools).sort()).toEqual(
       [
+        'connect_garmin',
         'connect_provider',
         'disconnect_provider',
         'get_activity',
@@ -34,6 +35,7 @@ describe('MCP interface', () => {
         'list_connections',
         'list_sync_runs',
         'list_webhook_events',
+        'refresh_garmin',
         'sync_provider',
         'whoami',
       ].sort(),

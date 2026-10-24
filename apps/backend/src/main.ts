@@ -31,9 +31,7 @@ async function bootstrap(): Promise<void> {
       : 'Strava: disabled (set STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET, see docs/providers/strava.md)',
   );
   logger.log(
-    config.garmin.clientId
-      ? `Garmin: enabled (callback ${config.garmin.redirectUri}; webhook ${config.garmin.webhookUrl ? 'configured' : 'off: set GARMIN_WEBHOOK_SECRET'})`
-      : 'Garmin: disabled (needs an approved Garmin Connect Developer Program app, see docs/providers/garmin.md)',
+    `Garmin Personal API: per-user keys via connect_garmin; poller ${config.garmin.pollerEnabled ? `on (every ${config.garmin.pollIntervalMs / 60_000} min per user, ${config.garmin.concurrency} at a time)` : 'off'}`,
   );
   logger.log(`Webhook worker: ${config.webhooks.workerEnabled ? `on (every ${config.webhooks.pollIntervalMs} ms)` : 'off'}`);
 }
