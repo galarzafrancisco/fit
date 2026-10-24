@@ -20,6 +20,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "verify:auth": "node scripts/verify-auth-imports.mjs",
+    "verify:ci-policy": "node scripts/verify-ci-policy.mjs",
     "nx": "nx",
     "graph": "nx graph",
     "start": "npm -w @fit/backend run start"
