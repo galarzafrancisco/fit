@@ -37,5 +37,8 @@
     "type": "git",
     "url": "git+https://github.com/galarzafrancisco/fit.git"
   },
-  "author": "Francisco Galarza"
+  "author": "Francisco Galarza",
+  "overrides": {
+    "multer": "^2.5.0"
+  }
 }
