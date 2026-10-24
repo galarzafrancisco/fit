@@ -8,12 +8,15 @@ on:
     branches:
       - main
       - feature/**
+  # Merge queue (only available on organisation-owned repositories). Harmless
+  # elsewhere; keeps the workflow correct if the repo moves to an organisation.
+  merge_group:
   push:
     branches:
       - main
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -23,6 +26,38 @@ env:
   IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+  merge-freshness:
+    name: Merge result is current
+    # A pull_request run tests refs/pull/N/merge: the PR merged into the base
+    # tip *as of when GitHub last built that ref*. If the base moved after that
+    # (or the run is a re-run of an old one), this job fails instead of letting
+    # a stale green result stand. Fix: update the branch and let CI run again.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - name: Checkout merge result
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify the tested commit is the PR merged into the current base tip
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$BASE_REF"
+          tested=$(git rev-parse HEAD)
+          base_tip=$(git rev-parse "origin/$BASE_REF")
+          echo "tested commit: $tested; PR head: $HEAD_SHA; current $BASE_REF tip: $base_tip"
+          [ "$tested" != "$HEAD_SHA" ] || { echo "::error::CI checked out the bare PR head, not the merge result"; exit 1; }
+          git merge-base --is-ancestor "$HEAD_SHA" HEAD || { echo "::error::tested commit does not contain the PR head"; exit 1; }
+          git merge-base --is-ancestor "$base_tip" HEAD || {
+            echo "::error::$BASE_REF has moved since this merge result was built. Update the branch (rebase or merge $BASE_REF) so CI re-validates the real merge result."
+            exit 1
+          }
+
   test:
     name: Lint, build and test
     runs-on: ubuntu-24.04-arm
@@ -69,6 +104,9 @@ jobs:
 
       - name: Verify @taico/auth imports
         run: npm run verify:auth
+
+      - name: Verify CI policy (merge-result guards still present)
+        run: npm run verify:ci-policy
 
       - name: Typecheck
         run: npm run typecheck
@@ -373,3 +411,24 @@ jobs:
           labels: |
             automated-deployment
             fit
+
+  # Single stable required check. Branch protection requires only this name, so
+  # adding, renaming or skipping a job above cannot silently drop a requirement.
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [merge-freshness, test, security, image, manifests]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to have succeeded (skipped only where intended)
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS"
+          echo "$NEEDS" | jq -e '
+            . as $n
+            | ($n.test.result == "success") and ($n.security.result == "success") and ($n.image.result == "success") and ($n.manifests.result == "success")
+            and ($n["merge-freshness"].result == "success"
+                 or ($n["merge-freshness"].result == "skipped" and "${{ github.event_name }}" != "pull_request"))
+          ' > /dev/null || { echo "::error::one or more required jobs did not succeed"; exit 1; }
