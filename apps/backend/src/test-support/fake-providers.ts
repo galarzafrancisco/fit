@@ -266,7 +266,7 @@ export function providerFetch(strava: FakeStrava, garmin: FakeGarmin): typeof fe
 export class FakeTaico {
   readonly registrations: Array<Record<string, unknown>> = [];
   readonly tokenRequests: URLSearchParams[] = [];
-  private readonly codes = new Map<string, string>();
+  private readonly codes = new Map<string, { subject: string; clientId?: string }>();
   private counter = 0;
 
   constructor(
@@ -275,9 +275,9 @@ export class FakeTaico {
   ) {}
 
   /** The user signs in at Taico as `subject`; returns the authorization code Taico sends back */
-  approve(subject: string): string {
+  approve(subject: string, clientId?: string): string {
     const code = `taico-code-${++this.counter}`;
-    this.codes.set(code, subject);
+    this.codes.set(code, { subject, clientId });
     return code;
   }
 
@@ -294,13 +294,15 @@ export class FakeTaico {
     }
     if (url.pathname === '/register') {
       this.registrations.push(JSON.parse(String(init?.body)));
-      return json({ client_id: 'fit-browser-client' }, 201);
+      return json({ client_id: `fit-browser-client-${this.registrations.length}` }, 201);
     }
     if (url.pathname === '/token') {
       const form = new URLSearchParams(String(init?.body));
       this.tokenRequests.push(form);
-      const subject = this.codes.get(form.get('code') ?? '');
-      if (!subject || !form.get('code_verifier')) return json({ error: 'invalid_grant' }, 400);
+      const grant = this.codes.get(form.get('code') ?? '');
+      // An authorization code is bound to the client it was issued to
+      if (!grant || !form.get('code_verifier') || (grant.clientId && grant.clientId !== form.get('client_id'))) return json({ error: 'invalid_grant' }, 400);
+      const subject = grant.subject;
       this.codes.delete(form.get('code')!); // codes are single-use
       return json({ access_token: await this.mint(subject), token_type: 'Bearer', expires_in: 600 });
     }

@@ -315,7 +315,7 @@ export async function browserSignIn(test: TestApp, link: string, subject: string
   if (first.status !== 302) return { first, callback: undefined, form: first, cookies: cookieHeader(first) };
   const authorize = new URL(first.headers.location);
   let cookies = cookieHeader(first);
-  const code = test.taico.approve(subject);
+  const code = test.taico.approve(subject, authorize.searchParams.get('client_id') ?? undefined);
   const callback = await test.http
     .get('/connect/garmin/auth')
     .set('Cookie', cookies)

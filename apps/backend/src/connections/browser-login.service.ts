@@ -14,7 +14,7 @@ export const SESSION_COOKIE = 'fit_garmin_session';
 const LOGIN_TTL_MS = 10 * 60_000;
 const SESSION_TTL_MS = 15 * 60_000;
 
-type LoginCookie = { state: string; verifier: string; link: string; exp: number };
+type LoginCookie = { state: string; verifier: string; link: string; clientId: string; exp: number };
 type SessionCookie = { linkHash: string; issuer: string; subject: string; exp: number };
 
 /** The identity Taico vouched for in the browser: who is really sitting at the page */
@@ -29,13 +29,15 @@ export type BrowserIdentity = { issuer: string; subject: string };
  * account the key is meant for.
  *
  * State lives in short-lived, AES-GCM encrypted, HttpOnly cookies instead of
- * server memory, so it works behind several pods. The Taico token is used once
+ * server memory, so it works behind several pods. That includes the dynamically
+ * registered client_id: an authorization code is bound to the client it was
+ * issued to, so the callback pod rebuilds that exact client from the cookie
+ * rather than registering a new one. The Taico token is used once
  * to read the identity and discarded; Fit never stores it.
  */
 @Injectable()
 export class BrowserLoginService {
   private readonly logger = new Logger('BrowserLogin');
-  private client: Promise<OAuthClient> | null = null;
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -52,23 +54,20 @@ export class BrowserLoginService {
     return this.config.publicBaseUrl.startsWith('https://');
   }
 
-  private oauthClient(): Promise<OAuthClient> {
-    this.client ??= (async () => {
-      const client = new OAuthClient({ issuer: this.config.auth.authorizationServers[0] ?? this.config.auth.issuer, fetch: this.authFetch });
-      await client.register({ clientName: 'Fit (Garmin connection page)', redirectUris: [this.redirectUri] });
-      return client;
-    })();
-    this.client.catch(() => {
-      this.client = null;
+  private newClient(clientId?: string): OAuthClient {
+    return new OAuthClient({
+      issuer: this.config.auth.authorizationServers[0] ?? this.config.auth.issuer,
+      fetch: this.authFetch,
+      ...(clientId ? { clientId } : {}),
     });
-    return this.client;
   }
 
   /** Where to send the browser to sign in, plus the encrypted cookie that proves the callback belongs to this attempt */
   async begin(link: string): Promise<{ url: string; cookie: string; maxAgeMs: number }> {
-    const client = await this.oauthClient();
+    const client = this.newClient();
+    const clientId = await client.register({ clientName: 'Fit (Garmin connection page)', redirectUris: [this.redirectUri] });
     const request = await client.createAuthorizationRequest({ redirectUri: this.redirectUri, resource: this.config.auth.mcpResourceUrl });
-    const payload: LoginCookie = { state: request.state, verifier: request.codeVerifier, link, exp: Date.now() + LOGIN_TTL_MS };
+    const payload: LoginCookie = { state: request.state, verifier: request.codeVerifier, link, clientId, exp: Date.now() + LOGIN_TTL_MS };
     return { url: request.url, cookie: this.seal(LOGIN_COOKIE, payload), maxAgeMs: LOGIN_TTL_MS };
   }
 
@@ -84,7 +83,7 @@ export class BrowserLoginService {
     const login = this.open<LoginCookie>(LOGIN_COOKIE, loginCookie);
     if (!login || !query.code || !query.state || !safeEqual(query.state, login.state)) return null;
     try {
-      const client = await this.oauthClient();
+      const client = this.newClient(login.clientId);
       const tokens = await client.exchangeCode({
         code: query.code,
         codeVerifier: login.verifier,
@@ -98,7 +97,6 @@ export class BrowserLoginService {
       const session: SessionCookie = { linkHash: sha256(login.link), ...identity, exp: Date.now() + SESSION_TTL_MS };
       return { identity, link: login.link, sessionCookie: this.seal(SESSION_COOKIE, session), maxAgeMs: SESSION_TTL_MS };
     } catch (error) {
-      this.client = null; // a stale client registration is replaced on the next attempt
       this.logger.warn(`Browser sign-in failed: ${(error as Error).constructor.name}`);
       return null;
     }
