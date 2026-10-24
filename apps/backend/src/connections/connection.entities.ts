@@ -74,6 +74,10 @@ export class ProviderConnectionEntity {
   @Column({ name: 'backoff_until', type: 'timestamptz', nullable: true })
   backoffUntil: Date | null;
 
+  /** Garmin: a sync of this connection holds the lease until this time (atomic claim; expires if the holder dies) */
+  @Column({ name: 'sync_lock_until', type: 'timestamptz', nullable: true })
+  syncLockUntil: Date | null;
+
   @Column({ name: 'failure_count', type: 'int', default: 0 })
   failureCount: number;
 

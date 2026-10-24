@@ -1,7 +1,8 @@
-import { Body, Controller, Get, Logger, Param, Post, Query, Res } from '@nestjs/common';
-import type { Response } from 'express';
+import { Body, Controller, Get, Logger, Param, Post, Query, Req, Res } from '@nestjs/common';
+import type { Request, Response } from 'express';
 import { GarminSyncService } from '../sync/garmin-sync.service';
 import { SyncService } from '../sync/sync.service';
+import { BrowserLoginService, LOGIN_COOKIE, SESSION_COOKIE, readCookie } from './browser-login.service';
 import { ConnectCallbackError, ConnectionsService, capitalize } from './connections.service';
 
 /**
@@ -18,37 +19,68 @@ export class ConnectCallbackController {
     private readonly connections: ConnectionsService,
     private readonly sync: SyncService,
     private readonly garminSync: GarminSyncService,
+    private readonly login: BrowserLoginService,
   ) {}
 
   /**
-   * Garmin Personal API key page. Reached through the single-use link that
-   * connect_garmin created for an authenticated Fit user; the link (hashed in
-   * the database) is the only thing that selects the user, never a query
-   * parameter naming one. Shows whose account the key will be attached to.
+   * Garmin Personal API key page. The link (hashed in the database) says which
+   * Fit account the key is for; it is not proof of who is at the keyboard.
+   * Before the form is shown the browser signs in with Taico (authorization
+   * code + PKCE, see BrowserLoginService) and the verified `(iss, sub)` must
+   * equal the account the link was issued to.
    */
   @Get('garmin')
-  async garminForm(@Query('link') link: unknown, @Res() res: Response): Promise<void> {
+  async garminForm(@Query('link') link: unknown, @Req() req: Request, @Res() res: Response): Promise<void> {
     securityHeaders(res);
-    const preview = await this.connections.previewGarminLink(typeof link === 'string' ? link : undefined);
-    if (!preview) {
+    const value = typeof link === 'string' ? link : undefined;
+    const preview = await this.connections.previewGarminLink(value);
+    if (!preview || !value) {
       res
         .status(400)
         .type('html')
         .send(page('Link not valid', 'This link is invalid, expired or already used. Ask your AI assistant for a new one with connect_garmin.'));
       return;
     }
-    res
-      .status(200)
-      .type('html')
-      .send(keyPage(preview.label, link as string));
+    const identity = this.login.session(readCookie(req.headers.cookie, SESSION_COOKIE), value);
+    if (identity && identity.issuer === preview.issuer && identity.subject === preview.subject) {
+      res.status(200).type('html').send(keyPage(preview.label, value));
+      return;
+    }
+    try {
+      const started = await this.login.begin(value);
+      res.cookie(LOGIN_COOKIE, started.cookie, this.cookieOptions(started.maxAgeMs));
+      res.redirect(302, started.url);
+    } catch (error) {
+      this.logger.error('Could not start the Taico sign-in', (error as Error).message);
+      res.status(502).type('html').send(page('Sign-in unavailable', 'Fit could not reach the sign-in service. Try the link again in a few minutes.'));
+    }
+  }
+
+  /** Where Taico sends the browser back after sign-in */
+  @Get('garmin/auth')
+  async garminAuth(@Query() query: Record<string, unknown>, @Req() req: Request, @Res() res: Response): Promise<void> {
+    securityHeaders(res);
+    const text = (key: string) => (typeof query[key] === 'string' ? (query[key] as string) : undefined);
+    res.clearCookie(LOGIN_COOKIE, this.cookieOptions());
+    const result = await this.login.complete(readCookie(req.headers.cookie, LOGIN_COOKIE), { code: text('code'), state: text('state') });
+    if (!result) {
+      res.status(400).type('html').send(page('Sign-in not completed', 'Signing in did not complete. Open the link from your AI assistant again.'));
+      return;
+    }
+    res.cookie(SESSION_COOKIE, result.sessionCookie, this.cookieOptions(result.maxAgeMs));
+    // Back to the key page, which now finds the session and compares the identity with the link's account
+    res.redirect(302, `/connect/garmin?link=${encodeURIComponent(result.link)}`);
   }
 
   @Post('garmin')
-  async garminSubmit(@Body() body: Record<string, unknown> | undefined, @Res() res: Response): Promise<void> {
+  async garminSubmit(@Body() body: Record<string, unknown> | undefined, @Req() req: Request, @Res() res: Response): Promise<void> {
     securityHeaders(res);
     const text = (key: string) => (typeof body?.[key] === 'string' ? (body[key] as string) : undefined);
     try {
-      const { connection } = await this.connections.completeGarminKey(text('link'), text('apiKey'));
+      const link = text('link');
+      const identity = link ? this.login.session(readCookie(req.headers.cookie, SESSION_COOKIE), link) : null;
+      const { connection } = await this.connections.completeGarminKey(link, text('apiKey'), identity);
+      res.clearCookie(SESSION_COOKIE, this.cookieOptions());
       this.garminSync.startInitialSync(connection);
       res
         .status(200)
@@ -72,6 +104,10 @@ export class ConnectCallbackController {
           page('Connection not completed', 'Something went wrong talking to Garmin. Ask for a new link with connect_garmin and try again in a few minutes.'),
         );
     }
+  }
+
+  private cookieOptions(maxAgeMs?: number) {
+    return { httpOnly: true, sameSite: 'lax' as const, secure: this.login.secureCookies, path: '/connect/garmin', ...(maxAgeMs ? { maxAge: maxAgeMs } : {}) };
   }
 
   @Get(':provider/callback')

@@ -141,11 +141,15 @@ Known gaps, deliberately left out of v1:
   Personal API client; response field names for activity lists come from that
   client's usage and Garmin Connect's list format, not from a published schema
   ([providers/garmin.md](providers/garmin.md)).
-- **The Garmin key link is a capability, not a browser login.** Fit has no web
-  login; `connect_garmin` is called with a Taico bearer token and returns a
-  short-lived single-use link. Anyone holding an unused link could attach *their
-  own* key to that user's account until it expires (they can read nothing).
-  A real Taico browser login (OIDC code flow from the page) would remove this.
+- **The Garmin key page signs in through Taico as an OAuth client.** Dynamic
+  client registration happens lazily at first use (in memory, per pod); if Taico
+  does not offer registration or the sign-in fails, the page answers 502/400 and
+  no key can be entered. Login/session state is in short-lived encrypted cookies
+  scoped to `/connect/garmin`, not in the database.
+- **Garmin sync lease**: `provider_connections.sync_lock_until` is taken with one
+  atomic `UPDATE ... WHERE lease free`, renewed before each Garmin call and
+  released afterwards (a dead holder lapses after 15 minutes). Concurrency is
+  bounded per pod (`GARMIN_CONCURRENCY`); across pods the bound is one run per connection.
 - **Scheduled re-sync exists only for Garmin** (Strava is webhook-driven).
 - **No Kubernetes manifests or image publishing yet** ([deployment.md](deployment.md)).
 - **Webhook worker is in-process**; claims use `SKIP LOCKED`, so several

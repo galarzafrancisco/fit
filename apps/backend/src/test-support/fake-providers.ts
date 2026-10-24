@@ -252,3 +252,53 @@ export function providerFetch(strava: FakeStrava, garmin: FakeGarmin): typeof fe
     throw new TypeError(`fetch failed: unexpected outbound request to ${url}`);
   }) as typeof fetch;
 }
+
+/**
+ * Stands in for Taico's authorization server as the Garmin key page's browser
+ * sign-in sees it: discovery, dynamic client registration and the token
+ * endpoint. `approve(subject)` is the user finishing the login in the browser.
+ */
+export class FakeTaico {
+  readonly registrations: Array<Record<string, unknown>> = [];
+  readonly tokenRequests: URLSearchParams[] = [];
+  private readonly codes = new Map<string, string>();
+  private counter = 0;
+
+  constructor(
+    private readonly issuer: string,
+    private readonly mint: (subject: string) => Promise<string>,
+  ) {}
+
+  /** The user signs in at Taico as `subject`; returns the authorization code Taico sends back */
+  approve(subject: string): string {
+    const code = `taico-code-${++this.counter}`;
+    this.codes.set(code, subject);
+    return code;
+  }
+
+  async fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+    if (url.pathname === '/.well-known/oauth-authorization-server') {
+      return json({
+        issuer: this.issuer,
+        authorization_endpoint: `${this.issuer}/authorize`,
+        token_endpoint: `${this.issuer}/token`,
+        registration_endpoint: `${this.issuer}/register`,
+      });
+    }
+    if (url.pathname === '/register') {
+      this.registrations.push(JSON.parse(String(init?.body)));
+      return json({ client_id: 'fit-browser-client' }, 201);
+    }
+    if (url.pathname === '/token') {
+      const form = new URLSearchParams(String(init?.body));
+      this.tokenRequests.push(form);
+      const subject = this.codes.get(form.get('code') ?? '');
+      if (!subject || !form.get('code_verifier')) return json({ error: 'invalid_grant' }, 400);
+      this.codes.delete(form.get('code')!); // codes are single-use
+      return json({ access_token: await this.mint(subject), token_type: 'Bearer', expires_in: 600 });
+    }
+    return json({ error: 'not_found' }, 404);
+  }
+}

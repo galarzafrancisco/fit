@@ -65,17 +65,32 @@ GPS tracks and sensor streams, private flag semantics. Stored as `null`.
    tool, which returns a link like
    `https://fit.american-broomstick.com/connect/garmin?link=…`.
    **Never paste the key into the chat.**
-3. Open the link. The page shows which Fit account it is for. Paste the key and
+3. Open the link. The browser is sent to Taico to sign in; the page then shows
+   which Fit account it is for. Paste the key and
    submit. Fit validates it with Garmin, stores it encrypted, and starts
    importing.
 
 How identity is bound: `connect_garmin` is called with the user's Taico access
 token, so the server knows the Fit user (`iss`, `sub`) when it creates the
 link. The link carries only a random single-use token (stored as a SHA-256),
-valid `OAUTH_STATE_TTL_SECONDS` (15 min), consumed on submission. No user ID in
-the URL is ever trusted. The page sends `no-store`, `no-referrer`, a strict CSP,
+valid `OAUTH_STATE_TTL_SECONDS` (15 min), consumed on submission. It says
+*which account the key is for*, not who is holding it, so possession of the link
+is not enough:
+
+1. Opening the link redirects the browser to Taico (OAuth authorization code +
+   PKCE, `resource` = the Fit MCP URL). `state`, the PKCE verifier and the link
+   live in an AES-GCM encrypted, HttpOnly, `SameSite=Lax` cookie (10 min).
+2. On return to `/connect/garmin/auth` Fit checks `state`, redeems the code and
+   verifies the access token like any MCP token (signature, `iss`, audience).
+   The token is used once to read `(iss, sub)` and discarded.
+3. Only if that `(iss, sub)` equals the account the link was issued for does
+   the form appear, and the submission re-checks it **before** spending the link.
+   A different signed-in user, or no session, gets a refusal and the link stays valid.
+
+No user ID in the URL is ever trusted. The page sends `no-store`, `no-referrer`, a strict CSP,
 and the key is posted over HTTPS (`PUBLIC_BASE_URL` must be https in production).
-Known limitation: the link is a capability — see [architecture.md](../architecture.md#technical-debt).
+Syncs of one connection are serialised by an atomic database lease, so concurrent
+`refresh_garmin` calls, the scheduler and several pods never call Garmin twice at once.
 
 ## Sync behavior
 

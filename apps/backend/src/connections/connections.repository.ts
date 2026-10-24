@@ -81,9 +81,35 @@ export class ConnectionsRepository {
       .where(`c.provider = 'garmin' AND c.status = 'active'`)
       .andWhere('(c.next_sync_at IS NULL OR c.next_sync_at <= :now)', { now })
       .andWhere('(c.backoff_until IS NULL OR c.backoff_until <= :now)', { now })
+      .andWhere('(c.sync_lock_until IS NULL OR c.sync_lock_until <= :now)', { now })
       .orderBy('c.next_sync_at', 'ASC', 'NULLS FIRST')
       .limit(limit)
       .getMany();
+  }
+
+  /**
+   * Atomically takes the sync lease on a connection. True for exactly one of any
+   * number of concurrent callers (requests or pods); the lease lapses on its own
+   * at `until` if the holder dies.
+   */
+  async claimSync(connectionId: string, now: Date, until: Date): Promise<boolean> {
+    const rows = returnedRows<{ id: string }>(
+      await this.uow.manager.query(
+        `UPDATE provider_connections SET sync_lock_until = $2
+         WHERE id = $1 AND status = 'active' AND (sync_lock_until IS NULL OR sync_lock_until <= $3) RETURNING id`,
+        [connectionId, until, now],
+      ),
+    );
+    return rows.length > 0;
+  }
+
+  /** Extends a lease held by a long run */
+  async renewSync(connectionId: string, until: Date): Promise<void> {
+    await this.uow.manager.update(ProviderConnectionEntity, { id: connectionId }, { syncLockUntil: until });
+  }
+
+  async releaseSync(connectionId: string): Promise<void> {
+    await this.uow.manager.update(ProviderConnectionEntity, { id: connectionId }, { syncLockUntil: null });
   }
 
   async purgeExpiredStates(now = new Date()): Promise<void> {

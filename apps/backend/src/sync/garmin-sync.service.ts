@@ -1,7 +1,6 @@
 import { ActivityMappingError } from '@fit/activity-model';
 import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { MoreThan } from 'typeorm';
 import { ActivityIngestService } from '../activities/activity-ingest.service';
 import { DomainError, ReauthorizationRequiredError, UpstreamError, UpstreamRateLimitedError } from '../common/errors';
 import { APP_CONFIG, type AppConfig } from '../config/env.config';
@@ -144,11 +143,20 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
   }
 
   private async runConnection(connection: ProviderConnectionEntity, trigger: SyncTrigger): Promise<SyncRunView & { note?: string }> {
+    // Atomic lease: of any number of concurrent refreshes, ticks or pods, exactly one gets to call Garmin
+    if (!(await this.repo.claimSync(connection.id, new Date(), new Date(Date.now() + RUNNING_TIMEOUT_MS)))) {
+      const current = await this.uow.manager.findOne(SyncRunEntity, { where: { connectionId: connection.id }, order: { startedAt: 'DESC' } });
+      return { ...(current ? toSyncRunView(current) : emptyView(connection)), note: 'A Garmin sync is already running.' };
+    }
+    try {
+      return await this.runClaimed(connection, trigger);
+    } finally {
+      await this.repo.releaseSync(connection.id).catch((error) => this.logger.warn(`Could not release Garmin sync lease: ${(error as Error).message}`));
+    }
+  }
+
+  private async runClaimed(connection: ProviderConnectionEntity, trigger: SyncTrigger): Promise<SyncRunView & { note?: string }> {
     const fresh = (await this.repo.findById(connection.id)) ?? connection;
-    const running = await this.uow.manager.findOne(SyncRunEntity, {
-      where: { connectionId: fresh.id, status: 'running', startedAt: MoreThan(new Date(Date.now() - RUNNING_TIMEOUT_MS)) },
-    });
-    if (running) return { ...toSyncRunView(running), note: 'A Garmin sync is already running.' };
 
     const startedAt = new Date();
     const polling = fresh.historyComplete || fresh.syncCursor !== null;
@@ -327,6 +335,7 @@ export class GarminSyncService implements OnModuleInit, OnModuleDestroy {
       const wait = last.at + this.config.minRequestIntervalMs - Date.now();
       if (wait > 0) await sleep(wait);
       last.at = Date.now();
+      await this.repo.renewSync(connectionId, new Date(last.at + RUNNING_TIMEOUT_MS));
       try {
         return await work(holder.token);
       } catch (error) {

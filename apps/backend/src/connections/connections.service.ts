@@ -253,12 +253,12 @@ export class ConnectionsService {
   }
 
   /** What the key page shows before submission: whose account the link is for. Null when invalid or expired */
-  async previewGarminLink(link: string | undefined): Promise<{ label: string } | null> {
+  async previewGarminLink(link: string | undefined): Promise<{ label: string; issuer: string; subject: string } | null> {
     if (!link || link.length > 200) return null;
     const state = await this.repo.findState(sha256(link));
     if (!state || state.provider !== 'garmin' || state.expiresAt.getTime() < Date.now()) return null;
     const user = await this.users.findById(state.userId);
-    return user ? { label: user.displayName ?? user.email ?? user.subject } : null;
+    return user ? { label: user.displayName ?? user.email ?? user.subject, issuer: user.issuer, subject: user.subject } : null;
   }
 
   /**
@@ -266,8 +266,16 @@ export class ConnectionsService {
    * one list call) and stores it encrypted for the link's user. The key is
    * never logged, echoed or returned.
    */
-  async completeGarminKey(link: string | undefined, apiKey: string | undefined): Promise<{ connection: ProviderConnectionEntity; userId: string }> {
+  async completeGarminKey(
+    link: string | undefined,
+    apiKey: string | undefined,
+    browser: { issuer: string; subject: string } | null,
+  ): Promise<{ connection: ProviderConnectionEntity; userId: string }> {
     if (!link || link.length > 200) throw new ConnectCallbackError('This link is missing. Ask your AI assistant for a new one with connect_garmin.');
+    // The signed-in browser must be the Fit user the link was issued to; checked before the link is spent
+    const owner = await this.previewGarminLink(link);
+    if (!browser || !owner || owner.issuer !== browser.issuer || owner.subject !== browser.subject)
+      throw new ConnectCallbackError('Sign in as the Fit user this link was created for, then try again. This link was not used.');
     const state = await this.repo.consumeState(sha256(link));
     if (!state || state.provider !== 'garmin')
       throw new ConnectCallbackError('This link is invalid or was already used. Ask your AI assistant for a new one with connect_garmin.');

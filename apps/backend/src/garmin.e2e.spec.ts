@@ -1,8 +1,9 @@
 import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { ConnectionsRepository } from './connections/connections.repository';
 import { GarminSyncService } from './sync/garmin-sync.service';
 import { garminActivity } from './test-support/fake-providers';
-import { callTool, connectGarmin, createTestApp, syncIdle, type TestApp } from './test-support/test-app';
+import { browserSignIn, callTool, connectGarmin, createTestApp, syncIdle, type TestApp } from './test-support/test-app';
 
 const KEY_A = 'garmin-personal-key-for-user-a-0123456789';
 const KEY_B = 'garmin-personal-key-for-user-b-9876543210';
@@ -79,16 +80,89 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
       expect((await test.http.post('/mcp').send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'connect_garmin' } })).status).toBe(401);
     });
 
-    it('shows whose account the link belongs to and refuses a forged or unknown link', async () => {
+    it('signs the browser in with Taico before showing the form, then shows whose account the key attaches to', async () => {
       const started = await callTool(test, tokenA, 'connect_garmin');
       const link = new URL(started.data.connectUrl).searchParams.get('link')!;
-      const page = await test.http.get('/connect/garmin').query({ link });
-      expect(page.status).toBe(200);
-      expect(page.text).toContain('garmin-owner-a');
-      expect(page.text).toContain('type="password"');
-      expect(page.headers['cache-control']).toBe('no-store');
-      expect(page.headers['content-security-policy']).toContain("default-src 'none'");
-      // A user ID in the URL has no effect on identity
+      // Without a session the link alone shows no form: the browser is sent to Taico (authorization code + PKCE, bound to the Fit resource)
+      const first = await test.http.get('/connect/garmin').query({ link });
+      expect(first.status).toBe(302);
+      expect(first.text).not.toContain('type="password"');
+      const authorize = new URL(first.headers.location);
+      expect(authorize.origin + authorize.pathname).toBe('https://taico.test/authorize');
+      expect(authorize.searchParams.get('code_challenge_method')).toBe('S256');
+      expect(authorize.searchParams.get('resource')).toBe(test.config.auth.mcpResourceUrl);
+      expect(authorize.searchParams.get('redirect_uri')).toBe('http://fit.test/connect/garmin/auth');
+      expect(String(first.headers['set-cookie'])).toMatch(/fit_garmin_login=.*HttpOnly/);
+      expect(first.headers.location).not.toContain(link);
+
+      const browser = await browserSignIn(test, link, 'garmin-owner-a');
+      expect(browser.callback!.status).toBe(302);
+      expect(String(browser.callback!.headers['set-cookie'])).toMatch(/fit_garmin_session=.*HttpOnly/);
+      expect(browser.form.status).toBe(200);
+      expect(browser.form.text).toContain('garmin-owner-a');
+      expect(browser.form.text).toContain('type="password"');
+      expect(browser.form.headers['cache-control']).toBe('no-store');
+      expect(browser.form.headers['content-security-policy']).toContain("default-src 'none'");
+      // The Taico access token is read once for the identity and never stored
+      expect(await db.query(`SELECT 1 FROM provider_connections WHERE provider = 'garmin'`)).toHaveLength(0);
+      expect(test.taico.tokenRequests.at(-1)!.get('code_verifier')).toBeTruthy();
+      await db.query(`DELETE FROM oauth_states`);
+    });
+
+    it('refuses a forwarded link: another signed-in user cannot attach a key to the link owner', async () => {
+      const started = await callTool(test, tokenA, 'connect_garmin');
+      const link = new URL(started.data.connectUrl).searchParams.get('link')!;
+      const stranger = await browserSignIn(test, link, 'garmin-owner-b');
+      // Taico vouches for B, but the link belongs to A: no form, and posting anyway is refused
+      expect(stranger.form.status).toBe(302);
+      expect(stranger.form.text).not.toContain('type="password"');
+      const post = await test.http.post('/connect/garmin').set('Cookie', stranger.cookies).type('form').send({ link, apiKey: KEY_B });
+      expect(post.status).toBe(400);
+      expect(post.text).toMatch(/Sign in as the Fit user/);
+      // Nor does holding the link without any session work
+      const bare = await test.http.post('/connect/garmin').type('form').send({ link, apiKey: KEY_B });
+      expect(bare.status).toBe(400);
+      expect(await db.query(`SELECT 1 FROM provider_connections WHERE provider = 'garmin'`)).toHaveLength(0);
+      // The refused attempts did not spend the link: the real owner can still use it
+      const owner = await browserSignIn(test, link, 'garmin-owner-a');
+      expect(owner.form.status).toBe(200);
+      await db.query(`DELETE FROM oauth_states`);
+    });
+
+    it('rejects a callback with the wrong state, a replayed code, or a forged cookie', async () => {
+      const started = await callTool(test, tokenA, 'connect_garmin');
+      const link = new URL(started.data.connectUrl).searchParams.get('link')!;
+      const first = await test.http.get('/connect/garmin').query({ link });
+      const cookie = String(first.headers['set-cookie'][0]).split(';')[0];
+      const state = new URL(first.headers.location).searchParams.get('state')!;
+      const code = test.taico.approve('garmin-owner-a');
+      expect((await test.http.get('/connect/garmin/auth').set('Cookie', cookie).query({ code, state: 'other' })).status).toBe(400);
+      expect((await test.http.get('/connect/garmin/auth').query({ code, state })).status).toBe(400); // no cookie
+      expect((await test.http.get('/connect/garmin/auth').set('Cookie', 'fit_garmin_login=forged').query({ code, state })).status).toBe(400);
+      expect((await test.http.get('/connect/garmin/auth').set('Cookie', cookie).query({ code, state })).status).toBe(302);
+      // Taico codes are single-use
+      expect((await test.http.get('/connect/garmin/auth').set('Cookie', cookie).query({ code, state })).status).toBe(400);
+      // A token Taico signed for another audience is not accepted as a sign-in either
+      const wrongAudience = await test.token({ subject: 'garmin-owner-a', audience: 'http://fit.test/other' });
+      const realFetch = test.taico.fetch.bind(test.taico);
+      const spy = jest.spyOn(test.taico, 'fetch').mockImplementation(async (input, init) => {
+        const response = await realFetch(input, init);
+        if (!String(input).endsWith('/token')) return response;
+        return new Response(JSON.stringify({ access_token: wrongAudience, token_type: 'Bearer', expires_in: 600 }), { status: 200 });
+      });
+      const again = await test.http.get('/connect/garmin').query({ link });
+      const code2 = test.taico.approve('garmin-owner-a');
+      const bad = await test.http
+        .get('/connect/garmin/auth')
+        .set('Cookie', String(again.headers['set-cookie'][0]).split(';')[0])
+        .query({ code: code2, state: new URL(again.headers.location).searchParams.get('state')! });
+      spy.mockRestore();
+      expect(bad.status).toBe(400);
+      expect(await db.query(`SELECT 1 FROM provider_connections WHERE provider = 'garmin'`)).toHaveLength(0);
+      await db.query(`DELETE FROM oauth_states`);
+    });
+
+    it('rejects an unknown link and ignores any user named in the URL', async () => {
       const spoof = await test.http.get('/connect/garmin').query({ link: 'nope', user: 'garmin-owner-b', userId: 'x' });
       expect(spoof.status).toBe(400);
       expect((await test.http.get('/connect/garmin')).status).toBe(400);
@@ -102,7 +176,7 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
       const expiredLink = new URL(expired.data.connectUrl).searchParams.get('link')!;
       await db.query(`UPDATE oauth_states SET expires_at = now() - interval '1 minute'`);
       expect((await test.http.get('/connect/garmin').query({ link: expiredLink })).status).toBe(400);
-      expect((await test.http.post('/connect/garmin').type('form').send({ link: expiredLink, apiKey: KEY_A })).text).toMatch(/expired/);
+      expect((await test.http.post('/connect/garmin').type('form').send({ link: expiredLink, apiKey: KEY_A })).status).toBe(400);
 
       const rejected = await connectGarmin(test, tokenA, 'wrong-key-that-garmin-does-not-know');
       expect(rejected.submit.status).toBe(400);
@@ -119,7 +193,8 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
       expect(submit.text).toContain('Garmin connected');
       expect(submit.text).not.toContain(KEY_A);
       // The link was single-use
-      const again = await test.http.post('/connect/garmin').type('form').send({ link, apiKey: KEY_A });
+      const { cookies } = await browserSignIn(test, link, 'garmin-owner-a');
+      const again = await test.http.post('/connect/garmin').set('Cookie', cookies).type('form').send({ link, apiKey: KEY_A });
       expect(again.status).toBe(400);
 
       const [row] = await db.query(`SELECT c.*, u.subject FROM provider_connections c JOIN users u ON u.id = c.user_id WHERE c.provider = 'garmin'`);
@@ -252,6 +327,36 @@ describe('Garmin end to end (Personal API: per-user API key, scheduled polling)'
       expect(test.garmin.calls.length).toBe(before);
       // sync_provider is the same operation
       expect((await callTool(test, tokenA, 'sync_provider', { provider: 'garmin' })).isError).toBe(false);
+    });
+
+    it('lets exactly one of many simultaneous refreshes call Garmin (atomic lease)', async () => {
+      await db.query(`UPDATE provider_connections SET sync_lock_until = NULL, backoff_until = NULL WHERE provider = 'garmin'`);
+      const [{ n: runsBefore }] = await db.query(`SELECT count(*)::int AS n FROM sync_runs`);
+      const runs = await Promise.all(Array.from({ length: 5 }, () => callTool(test, tokenA, 'refresh_garmin')));
+      const notes = runs.filter((r) => /already running/.test(r.data.note ?? ''));
+      expect(notes.length).toBeGreaterThanOrEqual(1);
+      // Only the winner synced: one new run row, not five
+      const [{ n: runsAfter }] = await db.query(`SELECT count(*)::int AS n FROM sync_runs`);
+      expect(runsAfter - runsBefore).toBe(1);
+      const [{ sync_lock_until }] = await db.query(`SELECT sync_lock_until FROM provider_connections WHERE provider = 'garmin'`);
+      expect(sync_lock_until).toBeNull(); // released
+    });
+
+    it('does not let two schedulers (pods) claim the same connection, and a dead holder lapses', async () => {
+      const [{ id }] = await db.query(`SELECT id FROM provider_connections WHERE provider = 'garmin'`);
+      const repo = test.app.get(ConnectionsRepository);
+      await db.query(`UPDATE provider_connections SET sync_lock_until = NULL`);
+      const now = new Date();
+      const claims = await Promise.all(Array.from({ length: 6 }, () => repo.claimSync(id, now, new Date(now.getTime() + 60_000))));
+      expect(claims.filter(Boolean)).toHaveLength(1);
+      // Held leases are skipped by the scheduler
+      await db.query(`UPDATE provider_connections SET next_sync_at = NULL, backoff_until = NULL WHERE id = $1`, [id]);
+      expect(await repo.dueGarminConnections(now, 10)).toHaveLength(0);
+      // A holder that died stops blocking once its lease lapses
+      expect(await repo.claimSync(id, new Date(now.getTime() + 120_000), new Date(now.getTime() + 180_000))).toBe(true);
+      await repo.releaseSync(id);
+      expect(await repo.dueGarminConnections(now, 10)).toHaveLength(1);
+      await db.query(`UPDATE provider_connections SET next_sync_at = now() + interval '30 minutes' WHERE id = $1`, [id]);
     });
 
     it('requires a connected Garmin account', async () => {

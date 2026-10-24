@@ -13,7 +13,7 @@ import { loadConfig, type AppConfig } from '../config/env.config';
 import { configureApp } from '../configure-app';
 import { SyncService } from '../sync/sync.service';
 import { WebhookWorker } from '../webhooks/webhook-worker.service';
-import { FakeGarmin, FakeStrava, GARMIN_API, STRAVA_API, STRAVA_OAUTH, providerFetch } from './fake-providers';
+import { FakeGarmin, FakeStrava, FakeTaico, GARMIN_API, STRAVA_API, STRAVA_OAUTH, providerFetch } from './fake-providers';
 
 export const ISSUER = 'https://taico.test';
 export const BASE_URL = 'http://fit.test';
@@ -26,6 +26,8 @@ export type TestApp = {
   config: AppConfig;
   strava: FakeStrava;
   garmin: FakeGarmin;
+  /** Taico's authorization server as the Garmin page's browser sign-in sees it */
+  taico: FakeTaico;
   /** Signs an access token the way Taico would */
   token: (options?: TokenOptions) => Promise<string>;
   close: () => Promise<void>;
@@ -152,10 +154,18 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
   } as NodeJS.ProcessEnv);
   const strava = new FakeStrava();
   const garmin = new FakeGarmin();
+  const taico = new FakeTaico(ISSUER, (subject) => sign(privateKey, { subject }));
 
   const boot = async (): Promise<INestApplication> => {
     const moduleRef = await Test.createTestingModule({
-      imports: [AppModule.forRoot({ config, jwks: staticJwks([jwk]), providerFetch: providerFetch(strava, garmin) })],
+      imports: [
+        AppModule.forRoot({
+          config,
+          jwks: staticJwks([jwk]),
+          providerFetch: providerFetch(strava, garmin),
+          authFetch: ((input, init) => taico.fetch(input, init)) as typeof fetch,
+        }),
+      ],
     }).compile();
     const app = moduleRef.createNestApplication({ logger: false, bodyParser: false });
     configureApp(app);
@@ -181,6 +191,7 @@ export async function createTestApp(options: TestAppOptions = {}): Promise<TestA
     config,
     strava,
     garmin,
+    taico,
     token: (options = {}) => sign(options.foreignKey ? foreign.privateKey : privateKey, options),
     close: async () => {
       await test.app.close();
@@ -263,15 +274,55 @@ export async function connectStrava(test: TestApp, token: string, athleteId: str
  * the browser opening the link and submitting the user's own API key, and the
  * initial sync finishing. Returns the page responses.
  */
-export async function connectGarmin(test: TestApp, token: string, apiKey: string) {
+export async function connectGarmin(test: TestApp, token: string, apiKey: string, options: { browserSubject?: string } = {}) {
   const started = await callTool(test, token, 'connect_garmin');
   if (started.isError) throw new Error(`connect_garmin failed: ${JSON.stringify(started.data)}`);
   const url = new URL(started.data.connectUrl as string);
   const link = url.searchParams.get('link')!;
-  const form = await test.http.get(url.pathname).query({ link });
-  const submit = await test.http.post('/connect/garmin').type('form').send({ link, apiKey });
+  const browser = await browserSignIn(test, link, options.browserSubject ?? tokenSubject(token));
+  const submit = await test.http.post('/connect/garmin').set('Cookie', browser.cookies).type('form').send({ link, apiKey });
   await syncIdle(test);
-  return { started: started.data, form, submit, link };
+  return { started: started.data, form: browser.form, submit, link };
+}
+
+/** The `sub` of a test access token */
+export function tokenSubject(token: string): string {
+  return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).sub;
+}
+
+const cookieHeader = (response: { headers: Record<string, unknown> }, existing = ''): string => {
+  const jar = new Map(
+    existing
+      .split('; ')
+      .filter(Boolean)
+      .map((c) => [c.split('=')[0], c] as const),
+  );
+  for (const set of (response.headers['set-cookie'] as string[] | undefined) ?? []) {
+    const pair = set.split(';')[0];
+    if (/=$/.test(pair) || /Expires=Thu, 01 Jan 1970/i.test(set)) jar.delete(pair.split('=')[0]);
+    else jar.set(pair.split('=')[0], pair);
+  }
+  return [...jar.values()].join('; ');
+};
+
+/**
+ * What a browser does with a connect link: opens it, is sent to Taico, signs
+ * in as `subject`, comes back to Fit and gets the key form. Returns the
+ * cookie jar and the final form response (or the first non-redirect answer).
+ */
+export async function browserSignIn(test: TestApp, link: string, subject: string) {
+  const first = await test.http.get('/connect/garmin').query({ link });
+  if (first.status !== 302) return { first, callback: undefined, form: first, cookies: cookieHeader(first) };
+  const authorize = new URL(first.headers.location);
+  let cookies = cookieHeader(first);
+  const code = test.taico.approve(subject);
+  const callback = await test.http
+    .get('/connect/garmin/auth')
+    .set('Cookie', cookies)
+    .query({ code, state: authorize.searchParams.get('state')! });
+  cookies = cookieHeader(callback, cookies);
+  const form = callback.status === 302 ? await test.http.get(callback.headers.location).set('Cookie', cookies) : callback;
+  return { first, authorize, callback, form, cookies };
 }
 
 /** Waits for background syncs started by OAuth callbacks */
